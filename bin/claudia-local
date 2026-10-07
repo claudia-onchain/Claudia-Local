@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+// claudia-local: start the local server (127.0.0.1 only) and open the dashboard.
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+
+const root = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const port = process.env.CLAUDIA_LOCAL_PORT || "3939";
+const url = `http://127.0.0.1:${port}`;
+
+const already = await fetch(`${url}/api/health`).then(r => r.ok).catch(() => false);
+const open = () => {
+  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+  try { spawn(cmd, [url], { stdio: "ignore", detached: true }).unref(); } catch { /* no browser opener */ }
+};
+if (already) {
+  console.log(`Claudia Local is already running: ${url}`);
+  open();
+} else {
+  const child = spawn(process.execPath, [join(root, "server", "index.js")], { stdio: "inherit", env: { ...process.env, CLAUDIA_LOCAL_PORT: port } });
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    if (await fetch(`${url}/api/health`).then(r => r.ok).catch(() => false)) { open(); break; }
+  }
+  const stop = () => child.kill("SIGTERM");
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  child.on("exit", code => process.exit(code ?? 0));
+}

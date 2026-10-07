@@ -1,0 +1,48 @@
+{
+  "name": "claudia-local",
+  "version": "0.1.0",
+  "description": "Claudia Local: a private agent workspace that runs on your own machine and connects to Claudia (useclaudia.xyz).",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://useclaudia.xyz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/claudia-onchain/claudia-local.git"
+  },
+  "bugs": {
+    "url": "https://github.com/claudia-onchain/claudia-local/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "bin": {
+    "claudia-local": "bin/claudia-local"
+  },
+  "scripts": {
+    "build": "tsc -p dashboard/tsconfig.json --noEmit && vite build --config dashboard/vite.config.ts",
+    "start": "node server/index.js",
+    "dev": "vite --config dashboard/vite.config.ts",
+    "check": "tsc -p dashboard/tsconfig.json --noEmit && node --check server/index.js",
+    "app:mac": "bash native/build-app.sh"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.99.0",
+    "@useclaudia/sdk": "^0.1.0",
+    "bs58": "^6.0.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@fontsource/dm-mono": "^5.3.0",
+    "@fontsource/dm-sans": "^5.3.0",
+    "@fontsource/instrument-serif": "^5.3.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router-dom": "^7.18.4",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.3"
+  }
+}
