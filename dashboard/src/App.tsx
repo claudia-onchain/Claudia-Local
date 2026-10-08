@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api, bus } from "./lib";
 import { connect, disconnect, useAgent } from "./agent";
@@ -12,6 +12,9 @@ import Skills from "./pages/Skills";
 import Activity from "./pages/Activity";
 import Claudia from "./pages/Claudia";
 import Settings from "./pages/Settings";
+import Generate from "./pages/Generate";
+import Socials from "./pages/Socials";
+import { useStudioEvents } from "./studio";
 
 export type AppState = { name: string; version: string; setup: boolean; unlocked: boolean; dataDir: string };
 
@@ -21,6 +24,8 @@ const NAV: { to: string; label: string; group?: string }[] = [
   { to: "/memory", label: "Memory" },
   { to: "/files", label: "Files" },
   { to: "/skills", label: "Skills" },
+  { to: "/generate", label: "Generate", group: "Studio" },
+  { to: "/socials", label: "Socials" },
   { to: "/claudia", label: "Overview", group: "Claudia" },
   { to: "/claudia/coins", label: "Coins" },
   { to: "/claudia/thread", label: "Thread" },
@@ -53,6 +58,7 @@ function Shell({ state }: { state: AppState }) {
   const [menu, setMenu] = useState(false);
   const [claudia, setClaudia] = useState<any>(null);
   const a = useAgent();
+  const waiting = useWaiting();
   useEffect(() => { setMenu(false); }, [loc.pathname]);
   const loadClaudia = useCallback(() => { api("/api/claudia/status").then(setClaudia).catch(() => {}); }, []);
   useEffect(() => {
@@ -73,6 +79,7 @@ function Shell({ state }: { state: AppState }) {
           <NavLink to={n.to} end={n.to === "/claudia"} className={({ isActive }) => (isActive ? "active" : "")}>
             {n.label}
             {n.to === "/chat" && a.pendingApprovals > 0 && <span className="count" title="Waiting for your answer">{a.pendingApprovals}</span>}
+            {n.to === "/socials" && waiting > 0 && <span className="count" title="Waiting for your approval">{waiting}</span>}
           </NavLink>
         </div>
       ))}
@@ -123,19 +130,41 @@ function Shell({ state }: { state: AppState }) {
           <Route path="/files" element={<Page><Files /></Page>} />
           <Route path="/skills" element={<Page narrow><Skills /></Page>} />
           <Route path="/activity" element={<Page><Activity /></Page>} />
+          <Route path="/generate/*" element={<Page><Generate /></Page>} />
+          <Route path="/socials/*" element={<Page><Socials /></Page>} />
           <Route path="/claudia/*" element={<Page><Claudia status={claudia} reloadStatus={loadClaudia} /></Page>} />
           <Route path="/settings" element={<Page narrow><Settings state={state} /></Page>} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>
         <nav className="tabbar">
           <NavLink to="/chat">Chat{a.pendingApprovals > 0 ? ` (${a.pendingApprovals})` : ""}</NavLink>
+          <NavLink to="/generate">Generate</NavLink>
+          <NavLink to="/socials">Socials{waiting > 0 ? ` (${waiting})` : ""}</NavLink>
           <NavLink to="/claudia">Claudia</NavLink>
-          <NavLink to="/memory">Memory</NavLink>
-          <NavLink to="/files">Files</NavLink>
         </nav>
       </div>
     </div>
   );
+}
+
+/** Posts and media waiting for approval (sidebar count). Quietly 0 when the studio packages aren't installed. */
+function useWaiting() {
+  const [n, setN] = useState(0);
+  const load = useCallback(() => {
+    Promise.all([
+      api<{ posts: unknown[] }>("/api/social/posts?status=pending_approval&limit=500").then(r => r.posts.length).catch(() => 0),
+      api<{ requests: { status: string }[] }>("/api/studio/requests").then(r => r.requests.filter(x => x.status === "pending").length).catch(() => 0),
+      api<{ jobs: unknown[] }>("/api/studio/jobs?status=needs_approval").then(r => r.jobs.length).catch(() => 0),
+    ]).then(x => setN(x.reduce((a, b) => a + b, 0)));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useStudioEvents(e => {
+    if (e.topic === "account" || (e.topic === "job" && ["running", "downloading"].includes(e.data?.status))) return; // progress ticks
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(load, 800);
+  });
+  return n;
 }
 
 function Page({ children, narrow }: { children: ReactNode; narrow?: boolean }) {

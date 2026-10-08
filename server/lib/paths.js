@@ -6,6 +6,13 @@
  *     config.json              0600  settings (no secrets)
  *     memory.json  chats.json  usage.json  activity.json  paper.json  spend.json  proposals.json
  *     workspace/               the only folder the agent's file tools can see
+ *     brand.json               Claudia's brand kit (portraits, voice, tone, banned phrases)
+ *     brand/  uploads/         brand portraits and reference files you upload in the studio
+ *     media/                   @useclaudia/media: jobs.json, library/YYYY-MM/ (generated files)
+ *     social/                  @useclaudia/social: accounts, posts, audit.jsonl
+ *     media-requests.json      media the agent, MCP or a campaign asked for, waiting for you
+ *     campaigns.json           campaign plans
+ *     studio-log.jsonl         action log for the studio (export from Settings → Safety)
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -26,6 +33,14 @@ export const P = {
   proposals: join(HOME, "proposals.json"),
   workspace: join(HOME, "workspace"),
   log: join(HOME, "server.log"),
+  brand: join(HOME, "brand.json"),
+  brandDir: join(HOME, "brand"),
+  uploads: join(HOME, "uploads"),
+  media: join(HOME, "media"),
+  social: join(HOME, "social"),
+  requests: join(HOME, "media-requests.json"),
+  campaigns: join(HOME, "campaigns.json"),
+  studioLog: join(HOME, "studio-log.jsonl"),
 };
 
 export function ensurePrivateDir(dir) {

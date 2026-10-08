@@ -21,6 +21,12 @@ import * as wsp from "./lib/workspace.js";
 import * as cl from "./lib/claudia.js";
 import { listModels, modelLabel, DEFAULT_MODEL } from "./lib/model.js";
 import { createAgent, toolList, HELPERS, TOOLS } from "./agent.js";
+import * as studio from "./lib/studio.js";
+import * as mcp from "./lib/mcp.js";
+import * as M from "./lib/studio-media.js";
+import * as S from "./lib/studio-social.js";
+import { handleStudio, oauthCallback, explainPackageError } from "./lib/routes-studio.js";
+import { CHAT_BY_ID, listChatModels } from "./lib/providers.js";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).version;
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -39,6 +45,12 @@ function log(msg) {
 }
 
 const agent = createAgent({ log });
+
+// ── studio: media, socials, local MCP ──────────────────────────────────────
+// Studio events (job progress, new drafts, connections) go to every open dashboard over the WebSocket.
+const broadcast = (m) => { const s = JSON.stringify(m); for (const c of wss.clients) if (c.readyState === 1) { try { c.send(s); } catch { /* */ } } };
+studio.init({ broadcast, log, port: PORT });
+mcp.init({ log, version: VERSION });
 
 // ── auto-lock ──────────────────────────────────────────────────────────────
 let lastActive = Date.now();
@@ -80,6 +92,7 @@ async function publicRoutes(req, res, url) {
     store.trackActivity("app", "Claudia Local set up");
     await startSession(res);
     log("Vault created");
+    studio.warm().catch(() => {});
     return json(res, 200, { ok: true, ...state(req), unlocked: true }), true;
   }
   if (url === "/api/unlock" && m === "POST") {
@@ -91,6 +104,7 @@ async function publicRoutes(req, res, url) {
     await startSession(res);
     lastActive = Date.now();
     log("Unlocked");
+    studio.warm().catch(() => {});
     return json(res, 200, { ok: true, ...state(req), unlocked: true }), true;
   }
   return false;
@@ -101,8 +115,11 @@ const qs = (req) => new URL(req.url, "http://x").searchParams;
 
 function publicConfig() {
   const c = store.getConfig();
+  const preset = CHAT_BY_ID.get(c.chat.provider) || CHAT_BY_ID.get("openrouter");
+  const chatModel = preset.id === "openrouter" ? c.model : c.chat.models[preset.id] || "";
   return {
-    model: c.model, modelLabel: modelLabel(c.model || DEFAULT_MODEL), usingDefaultModel: !c.model, roleModels: c.roleModels,
+    model: c.model, modelLabel: preset.id === "openrouter" ? modelLabel(c.model || DEFAULT_MODEL) : chatModel || "No model picked yet", usingDefaultModel: preset.id === "openrouter" && !c.model, roleModels: c.roleModels,
+    chat: { provider: preset.id, providerName: preset.name, baseUrl: c.chat.baseUrl, models: c.chat.models },
     temperature: c.temperature, maxTokens: c.maxTokens, tone: c.tone, askBeforePost: c.askBeforePost, autoLockMinutes: c.autoLockMinutes,
     showImages: c.showImages, openrouterKey: vault.mask("openrouterKey"), dataDir: HOME, workspaceDir: wsp.root(),
   };
@@ -156,6 +173,7 @@ async function claudiaRoutes(req, res, url) {
 async function privateRoutes(req, res, url) {
   const m = req.method;
   if (url.startsWith("/api/claudia/")) return claudiaRoutes(req, res, url);
+  if (await handleStudio(req, res, url)) return;
 
   if (url === "/api/lock" && m === "POST") { lockNow("you locked it"); res.setHeader("Set-Cookie", guards.sessionCookie("", 0)); return json(res, 200, { ok: true }); }
   if (url === "/api/passphrase" && m === "POST") {
@@ -176,6 +194,10 @@ async function privateRoutes(req, res, url) {
     return json(res, 200, publicConfig());
   }
   if (url === "/api/models" && m === "GET") {
+    const prov = qs(req).get("provider");
+    if (prov && prov !== "openrouter") {
+      try { return json(res, 200, { models: (await listChatModels(prov)).map(x => ({ id: x.id, name: x.name, context: null, noCost: false, promptPerM: null, completionPerM: null, tools: null })) }); } catch (e) { return json(res, 200, { models: [], error: "Couldn't load the model list: " + e.message }); }
+    }
     try { return json(res, 200, { models: await listModels() }); } catch (e) { return json(res, 200, { models: [], error: "Couldn't load the model list: " + e.message }); }
   }
 
@@ -264,6 +286,7 @@ async function handle(req, res) {
   securityHeaders(res, PORT);
   if (!guards.hostAllowed(req)) throw new HttpError(421, "Claudia Local only answers on 127.0.0.1 or localhost.");
   const url = (req.url || "/").split("?")[0];
+  if (url === "/oauth/callback" && req.method === "GET") return oauthCallback(req, res);
   if (!url.startsWith("/api/")) {
     if (req.method !== "GET" && req.method !== "HEAD") throw new HttpError(405, "Method not allowed");
     return serveStatic(req, res, url);
@@ -279,7 +302,7 @@ async function handle(req, res) {
 
 const server = createServer((req, res) => {
   handle(req, res).catch((e) => {
-    const x = e instanceof HttpError ? { status: e.status, message: e.message, extra: e.extra } : cl.explain(e);
+    const x = e instanceof HttpError ? { status: e.status, message: e.message, extra: e.extra } : explainPackageError(e) || cl.explain(e);
     if (x.status >= 500 && !(e.code)) log(`[http] ${req.method} ${(req.url || "").split("?")[0]} failed: ${e.stack || e.message}`);
     json(res, x.status || 500, { ok: false, error: x.message, code: x.code || e.code, ...(x.extra || {}) });
   });
@@ -319,11 +342,15 @@ server.on("error", (e) => {
 server.listen(PORT, HOST, () => {
   log(`Claudia Local ${VERSION} on http://${HOST}:${PORT} (data: ${HOME})`);
   if (!existsSync(join(DIST, "index.html"))) log("The dashboard isn't built yet. Run: npm run build");
+  mcp.apply().catch((e) => log(`[mcp] ${e.message}`));
 });
 
 function shutdown(sig) {
   log(`${sig}: shutting down`);
   clearInterval(beat);
+  mcp.close().catch(() => {});
+  M.close().catch(() => {});
+  S.close().catch(() => {});
   vault.lock();
   for (const c of wss.clients) { try { c.close(1001, "Closing"); } catch { /* */ } }
   server.close(() => process.exit(0));

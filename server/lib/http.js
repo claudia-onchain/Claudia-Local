@@ -5,7 +5,8 @@
  *  - Host must be 127.0.0.1:<port> or localhost:<port> (blocks DNS-rebinding pages),
  *  - writes must come from our own origin (or from no browser at all),
  *  - WebSocket upgrades must come from our own origin,
- *  - everything except /api/health, /api/state, /api/setup and /api/unlock needs the session cookie
+ *  - everything except /api/health, /api/state, /api/setup, /api/unlock and GET /oauth/callback (see
+ *    routes-studio.js: protected by the one-time OAuth state + PKCE) needs the session cookie
  *    that unlocking sets (HttpOnly, SameSite=Strict).
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";

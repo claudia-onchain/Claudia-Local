@@ -1,7 +1,7 @@
 {
   "name": "claudia-local",
-  "version": "0.1.0",
-  "description": "Claudia Local: a private agent workspace that runs on your own machine and connects to Claudia (useclaudia.xyz).",
+  "version": "0.2.0",
+  "description": "Claudia Local: a private agent workspace and creator studio that runs on your own machine and connects to Claudia (useclaudia.xyz). Bring your own keys.",
   "private": true,
   "license": "MIT",
   "homepage": "https://useclaudia.xyz",
@@ -23,12 +23,14 @@
     "build": "tsc -p dashboard/tsconfig.json --noEmit && vite build --config dashboard/vite.config.ts",
     "start": "node server/index.js",
     "dev": "vite --config dashboard/vite.config.ts",
-    "check": "tsc -p dashboard/tsconfig.json --noEmit && node --check server/index.js",
+    "check": "tsc -p dashboard/tsconfig.json --noEmit && for f in server/*.js server/lib/*.js bin/claudia-local; do node --check \"$f\" || exit 1; done",
     "app:mac": "bash native/build-app.sh"
   },
   "dependencies": {
     "@solana/web3.js": "^1.99.0",
-    "@useclaudia/sdk": "^0.1.0",
+    "@useclaudia/media": "^0.2.0",
+    "@useclaudia/sdk": "^0.2.0",
+    "@useclaudia/social": "^0.2.0",
     "bs58": "^6.0.0",
     "ws": "^8.22.0"
   },

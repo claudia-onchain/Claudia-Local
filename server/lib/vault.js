@@ -8,6 +8,8 @@
  * "Lock" (or quitting) forgets it. A wrong passphrase fails the GCM tag check.
  *
  * Secrets: openrouterKey · claudiaApiKey (ck_live_…) · deviceKey (signs API requests) · walletKey (signs Solana txs)
+ *          keys: { "<name>": "…" }   your own provider keys (Google, fal, ElevenLabs, X app, …), see providers.js
+ *          tokens: { "<name>": "…" } OAuth tokens a package asks us to keep (KeyProvider.set), never shown
  */
 import { createCipheriv, createDecipheriv, randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -116,6 +118,39 @@ export function set(patch) {
     else if (typeof v === "string") secrets[f] = v;
   }
   persist();
+}
+
+// ── provider keys (Settings → Keys and providers) ───────────────────────────
+// Names are free-form ("google", "x.clientId", "bluesky.appPassword"); providers.js decides which exist.
+const KEY_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const bucket = (b) => { need(); if (!secrets[b] || typeof secrets[b] !== "object") secrets[b] = {}; return secrets[b]; };
+
+export function getKey(name, b = "keys") {
+  if (!key) return null;
+  const v = secrets[b]?.[name];
+  return typeof v === "string" && v ? v : null;
+}
+
+/** Patch provider keys: a string sets a name, null or "" removes it. */
+export function setKeys(patch, b = "keys") {
+  const box = bucket(b);
+  for (const [n, v] of Object.entries(patch || {})) {
+    if (!KEY_NAME.test(n)) continue;
+    if (v === null || v === "") delete box[n];
+    else if (typeof v === "string") box[n] = v.slice(0, 8192);
+  }
+  persist();
+}
+
+export function keyNames(b = "keys") {
+  return key && secrets[b] && typeof secrets[b] === "object" ? Object.keys(secrets[b]) : [];
+}
+
+/** "set" + the last 4 characters (only for long values), never the value. */
+export function maskKey(name, b = "keys") {
+  const v = getKey(name, b);
+  if (!v) return { set: false, hint: "" };
+  return { set: true, hint: v.length > 16 ? "…" + v.slice(-4) : "" };
 }
 
 export function has(field) {

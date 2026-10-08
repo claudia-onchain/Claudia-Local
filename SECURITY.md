@@ -4,7 +4,8 @@ Claudia Local is a single-user app that runs on your computer. This page says wh
 
 ## What it protects
 
-- **Your secrets**: the OpenRouter key, the Claudia API key (`ck_live_…`), the device key that signs Claudia requests, and the agent wallet that signs Solana transactions.
+- **Your secrets**: your chat, media and social keys and developer-app credentials, the Claudia API key (`ck_live_…`), the device key that signs Claudia requests, and the agent wallet that signs Solana transactions.
+- **Your accounts**: nothing is posted to a social network without your approval in the dashboard.
 - **Your data**: chats, memories, files, activity.
 - **Your money**: the SOL in the agent wallet.
 
@@ -17,7 +18,9 @@ Claudia Local is a single-user app that runs on your computer. This page says wh
 - Writes (`POST`, `PUT`, `DELETE`) must carry our own `Origin`, or none at all. Browsers on other sites can't make them.
 - The WebSocket only accepts our own origin.
 - A strict Content Security Policy: scripts, styles, fonts and connections only from the app itself. Images may come from `https:` hosts (coin pictures; switch them off in Settings → Privacy).
-- Outbound calls: OpenRouter (model; the model list only when you open it), the Claudia address you set, and your Solana RPC (balances, simulation, sending). Nothing else, no analytics.
+- Outbound calls: your chat provider, the Claudia address you set, your Solana RPC, and the media and social providers you add keys for, only when you use them. The OAuth relay (`https://useclaudia.xyz/relay/oauth/callback`) is used only by networks that refuse loopback redirect URIs, and the media relay only by networks that pull media from a public URL. No analytics.
+- `GET /oauth/callback` is the only route without the session cookie (browsers don't send `SameSite=Strict` cookies on the way back from a sign-in). It's protected by the one-time OAuth `state` and the PKCE verifier held in memory; it needs the app to be unlocked and only shows a short result page.
+- The optional local MCP server (off by default) listens on `127.0.0.1` only, checks `Host`, refuses browser `Origin`s other than loopback, and needs a bearer token. Only the token's SHA-256 is stored; a new token replaces the old one.
 
 ### Lock and session
 
@@ -29,7 +32,8 @@ Claudia Local is a single-user app that runs on your computer. This page says wh
 ### Secrets at rest
 
 - `vault.json` holds all secrets in one AES-256-GCM box. The key comes from your passphrase with scrypt (N=2^15, r=8, p=1, random 16-byte salt). The passphrase is never written anywhere.
-- The dashboard never receives a secret: only "set / not set", the last characters of API keys, and public keys. Showing the wallet key for a backup asks for the passphrase again.
+- The dashboard never receives a secret: only "set / not set", the last characters of API keys, and public keys. Showing the wallet key for a backup asks for the passphrase again. Key tests show requests with every secret replaced by `***`.
+- Social sign-in tokens are sealed by `@useclaudia/social` (AES-256-GCM, `social/accounts.json`) with a random key that lives in the vault.
 - All data files are written atomically with mode `0600` in a `0700` folder (`~/.claudia-local`).
 - Importing from `~/.claudia` (the `@useclaudia/cli` setup) copies the keys into the vault; the CLI's own files are left as they are.
 
@@ -38,6 +42,10 @@ Claudia Local is a single-user app that runs on your computer. This page says wh
 - **No shell, no host files.** File tools work only inside `~/.claudia-local/workspace`. Paths with `..`, `~`, absolute paths to other places, NUL bytes and symbolic links are refused, and the check runs again after folders are created. Files are capped at 2 MB, the workspace at 200 MB.
 - **Tools can be switched off** one by one (Skills). Switched-off tools aren't offered to the model.
 - **Posting** in the public Claudia thread asks you to approve the exact text first (default on).
+- **Social networks**: the agent and MCP apps can only draft; drafts wait in Socials → Approvals. Previews show every label added and anything that blocks a post (price or return promises, banned phrases, caps). The kill switch stops all publishing and, optionally, drafting.
+- **Media spending**: media the agent, MCP apps or campaigns ask for waits for your approval (default); your per-job, per-day and per-month caps apply to every job.
+- **Files in posts**: media can only come from the studio library, your uploads, the brand kit or the workspace; anything else is refused.
+- **Action log**: every key change, generation, approval, draft and publish goes to `studio-log.jsonl` (no secrets).
 - **No trading tools.** The agent can read, quote and paper trade. For a real trade it can only leave a suggestion; you review it, run a dry run and confirm it yourself.
 - **Untrusted data.** Coin names, thread posts and file contents can contain instructions aimed at the model. The system prompt tells the model to treat tool results as data, and replies are rendered as plain Markdown: no HTML, no images (which could act as tracking beacons), links only to `http(s)`.
 - **Claudia coins only.** Claudia coin tools refuse coins that weren't launched on Claudia (or aren't $CLAUDIA).
@@ -57,7 +65,8 @@ The Claudia server never sees a secret key; it only receives signatures and sign
 ## What it doesn't protect against
 
 - **Malware or other people with access to your user account.** They can read memory, log keystrokes or wait for you to unlock. Use a strong passphrase and lock the app when you step away.
-- **The AI model provider** sees what you send in chat (OpenRouter and the model you pick). Don't paste secrets into chat.
+- **The AI model provider** sees what you send in chat (the chat provider and model you pick). Don't paste secrets into chat. Media providers see your prompts and references; social networks see what you publish.
+- **Provider bills.** Caps count what Claudia Local started; the provider's dashboard is the final word.
 - **Bad trades.** Caps limit losses per trade and per day; they don't make a trade good.
 - **A lost passphrase.** There's no recovery. Back up the agent wallet key (Claudia → Your agent → Back up wallet key) somewhere offline.
 

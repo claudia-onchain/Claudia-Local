@@ -44,6 +44,21 @@ export const DEFAULT_CONFIG = {
   askBeforePost: true,    // the agent must ask before it posts in the Claudia thread
   autoLockMinutes: 0,     // 0 = stay unlocked until you lock or quit
   showImages: true,       // coin pictures come from the coin's own image host
+  // Which OpenAI-compatible server the agent chats through (presets in providers.js → CHAT_PRESETS).
+  // `model` above stays the OpenRouter model; other providers keep their model id in chat.models.
+  chat: { provider: "openrouter", baseUrl: "", models: {} },
+  studio: {
+    // Spending caps handed to @useclaudia/media (US dollars). Jobs above approveAboveUsd wait for you.
+    limits: { perJobUsd: 2, perDayUsd: 10, perMonthUsd: 50, approveAboveUsd: 0.5 },
+    // Media the agent or MCP asks for waits in Socials → Approvals until you say yes.
+    askBeforeAgentMedia: true,
+    // Kill switch: posting = nothing publishes; drafts = the agent and MCP can't create drafts either.
+    killSwitch: { posting: false, drafts: false },
+    // Your own daily caps per network (on top of each network's own limits). 0 or missing = no extra cap.
+    postCaps: {},
+    // Built-in MCP server for Claude Desktop, Claude Code, Cursor (off by default). tokenHash = SHA-256.
+    mcp: { enabled: false, port: 3940, tokenHash: "", tokenHint: "" },
+  },
   claudia: {
     baseUrl: "https://useclaudia.xyz",
     rpcUrl: "",
@@ -65,7 +80,7 @@ function merge(base, patch) {
 }
 
 export function getConfig() {
-  return merge(DEFAULT_CONFIG, readJsonFile(P.config, {}));
+  return merge(structuredClone(DEFAULT_CONFIG), structuredClone(readJsonFile(P.config, {})));
 }
 
 export function saveConfig(next) {
@@ -84,6 +99,18 @@ const modelId = (v) => {
   return s;
 };
 
+/** https://…, or http:// on this machine. */
+const chatBaseUrl = (v) => {
+  const s = String(v ?? "").trim().replace(/\/+$/, "");
+  if (!s) return "";
+  let u;
+  try { u = new URL(s); } catch { throw Object.assign(new Error("The chat server address isn't a valid URL."), { status: 400 }); }
+  const local = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && local)) throw Object.assign(new Error("The chat server address must start with https:// (or http://localhost for a server on this machine)."), { status: 400 });
+  if (u.username || u.password) throw Object.assign(new Error("Put the key in the key field, not in the address."), { status: 400 });
+  return s;
+};
+
 /** Validates a settings patch from the dashboard. Unknown fields are ignored. */
 export function updateConfig(patch) {
   const c = getConfig();
@@ -96,6 +123,35 @@ export function updateConfig(patch) {
   if ("askBeforePost" in p) c.askBeforePost = !!p.askBeforePost;
   if ("autoLockMinutes" in p) c.autoLockMinutes = Math.round(num(p.autoLockMinutes, 0, 24 * 60, 0));
   if ("showImages" in p) c.showImages = !!p.showImages;
+  if (p.chat && typeof p.chat === "object") {
+    const q = p.chat;
+    if ("provider" in q) {
+      if (!/^[a-z0-9-]{1,32}$/.test(String(q.provider))) throw Object.assign(new Error("Unknown chat provider."), { status: 400 });
+      c.chat.provider = String(q.provider);
+    }
+    if ("baseUrl" in q) c.chat.baseUrl = chatBaseUrl(q.baseUrl);
+    if (q.models && typeof q.models === "object") for (const [k, v] of Object.entries(q.models)) if (/^[a-z0-9-]{1,32}$/.test(k)) c.chat.models[k] = modelId(v);
+  }
+  if (p.studio && typeof p.studio === "object") {
+    const q = p.studio;
+    if (q.limits && typeof q.limits === "object") {
+      const L = { ...c.studio.limits };
+      for (const k of ["perJobUsd", "perDayUsd", "perMonthUsd", "approveAboveUsd"]) if (k in q.limits) L[k] = Math.round(num(q.limits[k], 0, 100000, L[k]) * 100) / 100;
+      if (L.perJobUsd > L.perDayUsd && L.perDayUsd > 0) throw Object.assign(new Error("The per-job cap can't be bigger than the daily cap."), { status: 400 });
+      if (L.perDayUsd > L.perMonthUsd && L.perMonthUsd > 0) throw Object.assign(new Error("The daily cap can't be bigger than the monthly cap."), { status: 400 });
+      c.studio.limits = L;
+    }
+    if ("askBeforeAgentMedia" in q) c.studio.askBeforeAgentMedia = !!q.askBeforeAgentMedia;
+    if (q.killSwitch && typeof q.killSwitch === "object") {
+      if ("posting" in q.killSwitch) c.studio.killSwitch.posting = !!q.killSwitch.posting;
+      if ("drafts" in q.killSwitch) c.studio.killSwitch.drafts = !!q.killSwitch.drafts;
+    }
+    if (q.postCaps && typeof q.postCaps === "object") for (const [k, v] of Object.entries(q.postCaps)) if (/^[a-z-]{1,20}$/.test(k)) c.studio.postCaps[k] = Math.round(num(v, 0, 1000, 0));
+    if (q.mcp && typeof q.mcp === "object") {
+      if ("enabled" in q.mcp) c.studio.mcp.enabled = !!q.mcp.enabled;
+      if ("port" in q.mcp) c.studio.mcp.port = Math.round(num(q.mcp.port, 1024, 65535, c.studio.mcp.port));
+    }
+  }
   if (p.tools && typeof p.tools === "object") for (const [k, v] of Object.entries(p.tools)) if (/^[a-z_]{1,40}$/.test(k)) c.tools[k] = !!v;
   if (p.claudia && typeof p.claudia === "object") {
     const q = p.claudia;

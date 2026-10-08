@@ -150,6 +150,8 @@ function onMsg(m: any) {
     case "paper_update": bus.dispatchEvent(new Event("paper")); break;
     case "files_update": bus.dispatchEvent(new Event("files")); break;
     case "helper_result": bus.dispatchEvent(new CustomEvent("helper_result", { detail: m })); break;
+    // Creator studio events (job progress, drafts, connections, kill switch): see studio.ts → useStudioEvents.
+    case "studio": bus.dispatchEvent(new CustomEvent("studio", { detail: { topic: m.topic, data: m.data } })); return;
   }
   emit();
 }

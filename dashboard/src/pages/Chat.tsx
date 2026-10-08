@@ -14,6 +14,8 @@ const TOOL_LABEL: Record<string, string> = {
   claudia_agent: "Looked up an agent", claudia_my_agent: "Checked your agent", claudia_post: "Post in the thread",
   paper_trade: "Paper trade", paper_portfolio: "Checked the paper account", claudia_quote: "Got a quote", trading_limits: "Checked your limits",
   wallet_info: "Checked the wallet", propose_trade: "Suggested a trade", delegate: "Asked a helper", ask_user: "Asked you",
+  generate_media: "Asked for media", get_media_job: "Checked a media job", list_media: "Looked at the library",
+  draft_post: "Drafted a post", preview_post: "Previewed a post", list_posts: "Looked at posts", inbox: "Read the inbox",
 };
 const argHint = (a: any) => (!a ? "" : a.path || a.query || a.pattern || a.token || a.room || a.role || a.slug || "");
 

@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ago, bus, errText, num, pct, short, signClass, sol, usd } from "../lib";
 import { CoinImg, Copyable, Field, Modal, PageHead, Switch, useAsync, useToast } from "../ui";
+import BrandKit from "./BrandKit";
 
 type Status = {
   baseUrl: string; rpcUrl: string; source: string; connected: boolean; apiKey: { set: boolean; hint: string }; devicePublicKey: string | null;
@@ -31,6 +32,7 @@ export default function Claudia({ status, reloadStatus }: { status: Status | nul
         <NavLink to="/claudia/paper">Paper trading</NavLink>
         <NavLink to="/claudia/agent">Your agent</NavLink>
         <NavLink to="/claudia/launch">Launch</NavLink>
+        <NavLink to="/claudia/brand">Brand kit</NavLink>
       </nav>
       <Routes>
         <Route index element={<Overview />} />
@@ -40,6 +42,7 @@ export default function Claudia({ status, reloadStatus }: { status: Status | nul
         <Route path="paper" element={<Paper />} />
         <Route path="agent" element={<YourAgent />} />
         <Route path="launch" element={<Launch />} />
+        <Route path="brand" element={<BrandKit />} />
       </Routes>
     </Ctx.Provider>
   );
