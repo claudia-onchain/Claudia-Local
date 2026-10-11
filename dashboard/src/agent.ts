@@ -3,7 +3,7 @@ import { useSyncExternalStore } from "react";
 import { bus } from "./lib";
 
 export type Item =
-  | { kind: "user"; id: string; text: string }
+  | { kind: "user"; id: string; text: string; images?: string[] }
   | { kind: "assistant"; id: string; text: string; streaming?: boolean }
   | { kind: "tool"; id: string; name: string; args?: any; result?: string; state: "running" | "done" | "error" }
   | { kind: "helper"; id: string; role: string; task: string; status: "working" | "done" | "failed"; steps: string[]; summary?: string }
@@ -125,6 +125,10 @@ function onMsg(m: any) {
       setItems(sid, items => [...items.map(x => (x.kind === "assistant" && x.streaming ? { ...x, streaming: false } : x)), { kind: "approval", id: m.id, question: m.question, options: m.options || [], post: m.kind === "post" ? { room: m.room, content: m.content } : undefined }]);
       countApprovals();
       break;
+    case "approval_answered": // answered on the Approvals page or in Telegram
+      setItems(sid, items => items.map(x => (x.kind === "approval" && x.id === m.id && !x.answered ? { ...x, answered: `${m.text}${m.by === "telegram" ? " (in Telegram)" : ""}` } : x)));
+      countApprovals();
+      break;
     case "approval_closed":
       setItems(sid, items => items.map(x => (x.kind === "approval" && x.id === m.id && !x.answered ? { ...x, answered: "No answer in time" } : x)));
       countApprovals();
@@ -151,6 +155,8 @@ function onMsg(m: any) {
     case "files_update": bus.dispatchEvent(new Event("files")); break;
     case "helper_result": bus.dispatchEvent(new CustomEvent("helper_result", { detail: m })); break;
     // Creator studio events (job progress, drafts, connections, kill switch): see studio.ts → useStudioEvents.
+    // Tasks, approvals, Telegram: see pages/auto/auto.ts → useAutoEvents.
+    case "auto": bus.dispatchEvent(new CustomEvent("auto", { detail: { topic: m.topic, data: m.data } })); return;
     case "studio": bus.dispatchEvent(new CustomEvent("studio", { detail: { topic: m.topic, data: m.data } })); return;
   }
   emit();
@@ -178,8 +184,9 @@ function fromStored(messages: any[]): Item[] {
 export const agent = {
   subscribe(f: () => void) { subs.add(f); return () => { subs.delete(f); }; },
   get: () => state,
-  send(sessionId: string, text: string, opts: { images?: { data: string; mime: string }[]; attachments?: { name: string; text: string }[] } = {}) {
-    setItems(sessionId, items => [...items, { kind: "user", id: uid(), text }], { busy: true });
+  /** `previews`: data URLs of attached images, shown in this session only (images aren't saved). */
+  send(sessionId: string, text: string, opts: { images?: { data: string; mime: string }[]; attachments?: { name: string; text: string }[] } = {}, previews: string[] = []) {
+    setItems(sessionId, items => [...items, { kind: "user", id: uid(), text, ...(previews.length ? { images: previews } : {}) }], { busy: true });
     emit();
     if (!send({ type: "user_message", sessionId, content: text, ...opts })) {
       setItems(sessionId, items => [...items, { kind: "error", id: uid(), text: "Not connected to the app. Reconnecting…" }], { busy: false });

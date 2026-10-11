@@ -1,0 +1,44 @@
+name: Release
+
+# Push a tag like v0.3.0. This builds, packs the npm tarball, writes SHA-256 checksums and attaches both to a
+# GitHub Release. If the repository has an NPM_TOKEN secret, it also publishes to npm with provenance.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - name: Tag matches package.json
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME doesn't match package.json $v"; exit 1; }
+      - run: npm pack   # prepack builds the dashboard
+      - run: npm run smoke
+      - name: Checksums
+        run: sha256sum claudia-local-*.tgz > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$(awk -v v="## ${GITHUB_REF_NAME#v}" '$0==v{on=1;next} /^## /{if(on)exit} on' CHANGELOG.md)"
+          gh release create "$GITHUB_REF_NAME" claudia-local-*.tgz SHA256SUMS.txt --title "Claudia Local ${GITHUB_REF_NAME#v}" --notes "${notes:-See CHANGELOG.md}"
+      - name: Publish to npm (only when NPM_TOKEN is set)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then echo "No NPM_TOKEN secret; skipping npm publish."; exit 0; fi
+          npm publish claudia-local-*.tgz --provenance --access public

@@ -25,11 +25,11 @@ export const TEMPLATES = {
   launch: { label: "Launch day", posts: [
     { at: -24 * 60, text: "Something new lands on Claudia tomorrow: {coin}. {goal}", media: null },
     { at: -60, text: "One hour until {coin} goes live on Claudia.", media: null },
-    { at: 0, text: "{coin} is live on Claudia. {goal}", media: { kind: "image", prompt: "Claudia celebrating the launch of {coin}, bold poster, the ticker {coin} in large type", aspect: "16:9" } },
+    { at: 0, text: "{coin} is live on Claudia. {goal}", media: { kind: "image", prompt: "{brand} celebrating the launch of {coin}, bold poster, the ticker {coin} in large type", aspect: "16:9" } },
     { at: 3 * 60, text: "Thanks to everyone who came by for {coin}'s launch. Here's what happens next.", media: null },
-    { at: 24 * 60, text: "Day one with {coin}: a short recap from Claudia.", media: { kind: "image", prompt: "Claudia with a recap board for {coin}, warm and friendly", aspect: "1:1" } },
+    { at: 24 * 60, text: "Day one with {coin}: a short recap.", media: { kind: "image", prompt: "{brand} with a recap board for {coin}, warm and friendly", aspect: "1:1" } },
   ] },
-  week: { label: "One week of posts", posts: Array.from({ length: 7 }, (_, i) => ({ at: i * 24 * 60, text: i === 0 ? "This week on Claudia: {coin}. {goal}" : `Day ${i + 1} with {coin}: {goal}`, media: i % 3 === 0 ? { kind: "image", prompt: "Claudia talking about {coin}, day " + (i + 1), aspect: "1:1" } : null })) },
+  week: { label: "One week of posts", posts: Array.from({ length: 7 }, (_, i) => ({ at: i * 24 * 60, text: i === 0 ? "This week on Claudia: {coin}. {goal}" : `Day ${i + 1} with {coin}: {goal}`, media: i % 3 === 0 ? { kind: "image", prompt: "{brand} talking about {coin}, day " + (i + 1), aspect: "1:1" } : null })) },
 };
 
 export const list = () => readJsonFile(P.campaigns, []);
@@ -40,7 +40,7 @@ export function remove(id) {
   return { ok: true };
 }
 
-const fill = (s, v) => String(s || "").replace(/\{coin\}/g, v.coin).replace(/\{goal\}/g, v.goal).replace(/\s+/g, " ").trim();
+const fill = (s, v) => String(s || "").replace(/\{coin\}/g, v.coin).replace(/\{goal\}/g, v.goal).replace(/\{brand\}/g, studio.getBrand().name || "A creator").replace(/\s+/g, " ").trim();
 
 async function planWithAgent(v) {
   const cfg = getConfig();
@@ -48,8 +48,9 @@ async function planWithAgent(v) {
   if (c.error) throw err(409, c.error);
   const brand = studio.getBrand();
   const sys = [
-    `You plan social media campaigns for ${brand.name}, an AI influencer agent on Claudia (a Solana memecoin terminal and launcher). Write in her voice.`,
+    `You plan social media campaigns for ${brand.name || "the user's brand"}. Coins mentioned are launched on Claudia (a Solana-first launchpad). Write in the brand's voice.`,
     brand.style ? `Tone guide:\n${brand.style.slice(0, 2000)}` : "",
+    brand.topics?.length ? `Topics the brand covers: ${brand.topics.join(", ")}.` : "",
     brand.banned.length ? `Never use: ${brand.banned.join(", ")}.` : "",
     "Rules: never promise prices, returns or gains. No 'to the moon', no financial advice. Plain, warm, short. Each post fits on X (under 270 characters).",
     `Answer with JSON only: {"posts":[{"at": minutes from the start (can be negative for teasers), "text": "...", "media": null or {"kind":"image"|"video","prompt":"...","aspect":"1:1"|"16:9"|"9:16"}}]}. At most ${v.maxPosts} posts; media on at most ${v.maxMedia} of them.`,

@@ -32,7 +32,7 @@ export type Post = { id: string; status: PostStatus; input: PostInput; createdAt
 export type Preview = { account: string; network: NetworkId; text: string; chars: number; media: number; labelsAdded: string[]; costUsd?: number; warnings: string[]; blocked?: string };
 export type PkgStatus = { installed: boolean; package: string; version?: string | null; install?: string; error?: string };
 export type StudioStatus = { media: PkgStatus; social: PkgStatus; killSwitch: { posting: boolean; drafts: boolean }; askBeforeAgentMedia: boolean; redirects: { loopback: string; relay: string } };
-export type Brand = { id: string; name: string; refs: string[]; voice: { provider: string; voiceId: string }; style: string; banned: string[]; useInChat: boolean; useInSocial: boolean };
+export type Brand = { id: string; name: string; refs: string[]; voice: { provider: string; voiceId: string }; style: string; topics: string[]; visuals: string; banned: string[]; useInChat: boolean; useInSocial: boolean; preset: string };
 
 /** Live studio events from the server (job progress, drafts, connections, kill switch). */
 export type StudioEvent = { topic: "job" | "post" | "account" | "request" | "kill"; data: any };

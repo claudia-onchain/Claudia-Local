@@ -1,0 +1,22 @@
+name: Skill request
+description: Ask for an Agent Skill in the Claudia library.
+labels: [skill]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Skill name
+      placeholder: "podcast-show-notes"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What the agent should be able to do with it
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Sources or examples
+      description: Links to docs, playbooks or an existing SKILL.md you'd like reviewed. Skills are instructions only; Claudia Local never runs their scripts.

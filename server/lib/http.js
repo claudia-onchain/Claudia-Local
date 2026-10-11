@@ -8,8 +8,13 @@
  *  - everything except /api/health, /api/state, /api/setup, /api/unlock and GET /oauth/callback (see
  *    routes-studio.js: protected by the one-time OAuth state + PKCE) needs the session cookie
  *    that unlocking sets (HttpOnly, SameSite=Strict).
+ *  - sessions expire: after SESSION_IDLE_MS without a request, and SESSION_MAX_MS after unlocking at the
+ *    latest. The vault's own auto-lock (Settings → Lock) still applies on top.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
+
+export const SESSION_IDLE_MS = 12 * 60 * 60_000;
+export const SESSION_MAX_MS = 24 * 60 * 60_000;
 
 export class HttpError extends Error {
   constructor(status, message, extra = {}) { super(message); this.status = status; this.extra = extra; }
@@ -59,7 +64,8 @@ export function createGuards(port) {
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
   const origins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
   const cookieName = `cl_session_${port}`;
-  let sessions = new Map(); // token -> lastSeen
+  let sessions = new Map(); // token -> { created, seen }
+  const alive = (s, now) => now - s.seen < SESSION_IDLE_MS && now - s.created < SESSION_MAX_MS;
 
   return {
     cookieName,
@@ -80,21 +86,29 @@ export function createGuards(port) {
     },
     newSession() {
       const t = randomBytes(32).toString("base64url");
-      sessions.set(t, Date.now());
+      const now = Date.now();
+      for (const [k, s] of sessions) if (!alive(s, now)) sessions.delete(k);
+      sessions.set(t, { created: now, seen: now });
       return t;
     },
-    sessionCookie(token, maxAgeSec) {
+    sessionCookie(token, maxAgeSec = token ? SESSION_MAX_MS / 1000 : undefined) {
       return `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict${maxAgeSec !== undefined ? `; Max-Age=${maxAgeSec}` : ""}`;
     },
     hasSession(req) {
       const t = parseCookies(req.headers.cookie)[cookieName];
       if (!t) return false;
-      for (const [k] of sessions) {
+      const now = Date.now();
+      for (const [k, s] of sessions) {
         const a = Buffer.from(k), b = Buffer.from(t);
-        if (a.length === b.length && timingSafeEqual(a, b)) { sessions.set(k, Date.now()); return true; }
+        if (a.length === b.length && timingSafeEqual(a, b)) {
+          if (!alive(s, now)) { sessions.delete(k); return false; }
+          s.seen = now;
+          return true;
+        }
       }
       return false;
     },
+    sessionCount() { const now = Date.now(); return [...sessions.values()].filter(s => alive(s, now)).length; },
     endAllSessions() { sessions = new Map(); },
   };
 }

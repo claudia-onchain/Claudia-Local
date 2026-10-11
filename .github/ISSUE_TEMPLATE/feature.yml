@@ -1,0 +1,22 @@
+name: Feature
+description: Ask for something new or different.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to do
+      description: The task you're trying to get done, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you'd like it to work. Screens, steps or examples are welcome.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Money and posts
+      options:
+        - label: This touches trades, launches, wallets or posting (it will need to keep the confirm-first rules in SECURITY.md).

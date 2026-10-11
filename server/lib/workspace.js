@@ -16,7 +16,7 @@ class OutsideError extends Error {
   constructor(p) { super(`Refused: "${p}" is outside your workspace. Files can only be read and written inside the Claudia Local workspace.`); this.status = 403; this.code = "outside_workspace"; }
 }
 
-const HOST_PREFIX = /^\/(Users|home|root|etc|var|private|tmp|opt|usr|bin|sbin|System|Library|Applications|Volumes|dev|proc|mnt|srv|boot)(\/|$)/i;
+const HOST_PREFIX = /^(\/(Users|home|root|etc|var|private|tmp|opt|usr|bin|sbin|System|Library|Applications|Volumes|dev|proc|mnt|srv|boot)(\/|$)|[a-z]:\/|\/\/)/i; // + Windows drives and UNC paths
 
 let rootReal = null;
 export function root() {
@@ -39,10 +39,12 @@ export function resolveInside(input) {
   if (s.startsWith("~")) throw new OutsideError(raw);
   // Real host paths (home folders, system folders, other disks) are refused outright instead of being
   // quietly mapped into the workspace, so it is obvious to the agent that they are off limits.
-  if (!(s.startsWith(r + "/") || s === r) && HOST_PREFIX.test(s)) throw new OutsideError(raw);
+  const rs = r.split(sep).join("/"); // the root with forward slashes (Windows)
+  const inRoot = s === rs || s.startsWith(rs + "/");
+  if (!inRoot && HOST_PREFIX.test(s)) throw new OutsideError(raw);
   // Absolute paths that already point into the real workspace folder are fine; any other absolute path is
   // treated as relative to the workspace root ("/notes/a.md" → <root>/notes/a.md).
-  const full = s.startsWith(r + "/") || s === r ? resolve(s) : resolve(r, "." + (s.startsWith("/") ? s : "/" + s));
+  const full = inRoot ? resolve(s) : resolve(r, "." + (s.startsWith("/") ? s : "/" + s));
   if (full !== r && !full.startsWith(r + sep)) throw new OutsideError(raw);
   // No symlinks anywhere between the root and the target.
   let cur = r;
@@ -91,7 +93,10 @@ export function read(p) {
   if (!existsSync(full)) throw Object.assign(new Error(`File not found: ${display(full)}`), { status: 404 });
   const st = lstatSync(full);
   if (st.isDirectory()) throw Object.assign(new Error(`${display(full)} is a folder`), { status: 400 });
-  if (st.size > MAX_FILE_BYTES) throw Object.assign(new Error(`${display(full)} is larger than 2 MB`), { status: 413 });
+  if (st.size > MAX_FILE_BYTES) {
+    if (IMAGE_NAME.test(full)) return { path: display(full), size: st.size, binary: true, content: "" };
+    throw Object.assign(new Error(`${display(full)} is larger than 2 MB`), { status: 413 });
+  }
   const buf = readFileSync(full);
   if (buf.subarray(0, 8000).includes(0)) return { path: display(full), size: st.size, binary: true, content: "" };
   return { path: display(full), size: st.size, binary: false, content: buf.toString("utf-8") };
@@ -116,6 +121,29 @@ export function write(p, content) {
   resolveInside(display(dirname(full))); // re-check after creating parents
   writeFileSync(full, data, { mode: 0o600 });
   return { path: display(full), size: data.length };
+}
+
+const IMAGE_NAME = /\.(png|jpe?g|gif|webp)$/i;
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+/** Saves an uploaded picture (PNG, JPEG, GIF or WEBP, checked by its first bytes) into the workspace. */
+export function writeImage(p, buf) {
+  const full = resolveInside(p);
+  if (full === root()) throw Object.assign(new Error("Give the file a name."), { status: 400 });
+  if (!IMAGE_NAME.test(full)) throw Object.assign(new Error("Pictures need a .png, .jpg, .gif or .webp name."), { status: 415 });
+  if (!buf.length) throw Object.assign(new Error("The file is empty."), { status: 400 });
+  if (buf.length > MAX_IMAGE_BYTES) throw Object.assign(new Error("Pictures can be at most 4 MB."), { status: 413 });
+  const h = buf.subarray(0, 12);
+  const ok = (h[0] === 0x89 && h[1] === 0x50 && h[2] === 0x4e && h[3] === 0x47) || (h[0] === 0xff && h[1] === 0xd8)
+    || h.subarray(0, 4).toString() === "GIF8" || (h.subarray(0, 4).toString() === "RIFF" && h.subarray(8, 12).toString() === "WEBP");
+  if (!ok) throw Object.assign(new Error("That file isn't a PNG, JPEG, GIF or WEBP picture."), { status: 415 });
+  if (existsSync(full) && lstatSync(full).isDirectory()) throw Object.assign(new Error(`${display(full)} is a folder`), { status: 400 });
+  const prev = existsSync(full) ? lstatSync(full).size : 0;
+  if (totalBytes() - prev + buf.length > MAX_TOTAL_BYTES) throw Object.assign(new Error("The workspace is full (200 MB)."), { status: 413 });
+  mkdirSync(dirname(full), { recursive: true, mode: 0o700 });
+  resolveInside(display(dirname(full)));
+  writeFileSync(full, buf, { mode: 0o600 });
+  return { path: display(full), size: buf.length };
 }
 
 export function mkdir(p) {
@@ -143,10 +171,12 @@ export function search(pattern, p = "/", limit = 100) {
       if (e.isSymbolicLink()) continue;
       const f = join(dir, e.name);
       if (e.isDirectory()) { walk(f); continue; }
-      if (!e.isFile() || statSync(f).size > MAX_FILE_BYTES) continue;
-      const buf = readFileSync(f);
-      if (buf.subarray(0, 8000).includes(0)) continue;
+      if (!e.isFile()) continue;
+      // The name first, for every file: pictures and other binary files are found by name too.
       if (e.name.toLowerCase().includes(needle)) out.push({ path: display(f), line: 0, content: "(file name)" });
+      if (out.length >= limit || statSync(f).size > MAX_FILE_BYTES) continue;
+      const buf = readFileSync(f);
+      if (buf.subarray(0, 8000).includes(0)) continue; // binary: no text to search
       const lines = buf.toString("utf-8").split("\n");
       for (let i = 0; i < lines.length && out.length < limit; i++) {
         if (lines[i].toLowerCase().includes(needle)) out.push({ path: display(f), line: i + 1, content: lines[i].slice(0, 200) });

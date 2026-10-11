@@ -1,0 +1,62 @@
+name: Bug
+description: Something doesn't work the way it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Never paste keys, passphrases, wallet secrets or your vault.json.** Logs can carry addresses and account names; redact what you don't want public. Security problems go to a [private advisory](https://github.com/claudia-onchain/Claudia-Local/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Claudia Local version
+      description: Shown at the bottom of the sidebar, or run `claudia-local --version`.
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options: [npm / npx, install script, Docker, from source, macOS app]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15.4, Windows 11, Ubuntu 24.04, WSL…"
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      description: "`node -v`"
+      placeholder: "v22.13.0"
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Chat model provider and model
+      placeholder: "Anthropic, claude-…; Ollama, llama3.2; OpenRouter, …"
+  - type: textarea
+    id: doctor
+    attributes:
+      label: claudia-local doctor
+      description: Output of `claudia-local doctor --offline` (it contains no secrets).
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (redacted)
+      description: The last lines of `~/.claudia-local/server.log` around the problem. Remove addresses and names you don't want public.
+      render: text

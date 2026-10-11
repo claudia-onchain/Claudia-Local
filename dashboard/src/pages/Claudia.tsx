@@ -1,15 +1,21 @@
-// Claudia: $CLAUDIA and coins launched on Claudia, the thread, paper trading, your agent, launches.
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+// Claudia: $CLAUDIA and coins launched on Claudia (Solana, Robinhood Chain beta), the thread, paper trading, your agent, launches.
+import { createContext, Fragment, useContext, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ago, bus, errText, num, pct, short, signClass, sol, usd } from "../lib";
 import { CoinImg, Copyable, Field, Modal, PageHead, Switch, useAsync, useToast } from "../ui";
 import BrandKit from "./BrandKit";
+import OneClick from "./connect/OneClick";
+import { fileUrl } from "../studio";
+import { CHAIN_NAME, ChainSwitch, DataPanel, EvmWalletCard, HotWallets, TradeConfirm, UNIT, chainOfKey, native, useLaunchpads, useLivePrice, type ChainId } from "./claudia/Chains";
 
+type CapsLeft = { perTrade: number; perDay: number; unit: string; spentToday: number; soldToday: number; leftToday: number; sellLeftToday: number };
 type Status = {
-  baseUrl: string; rpcUrl: string; source: string; connected: boolean; apiKey: { set: boolean; hint: string }; devicePublicKey: string | null;
-  walletAddress: string | null; agent: any; caps: { maxSolPerTrade: number; maxSolPerDay: number }; liveTrading: boolean; spentToday: number; room: string;
+  baseUrl: string; rpcUrl: string; hoodRpcUrl: string; source: string; connected: boolean; apiKey: { set: boolean; hint: string }; devicePublicKey: string | null;
+  walletAddress: string | null; evmAddress: string | null; hot: Record<ChainId, { address: string | null; use: boolean }>; agent: any;
+  caps: { maxSolPerTrade: number; maxSolPerDay: number; maxEthPerTrade: number; maxEthPerDay: number }; capsLeft: Record<ChainId, CapsLeft>;
+  chain: ChainId; liveTrading: boolean; spentToday: number; room: string;
 };
-const Ctx = createContext<{ st: Status | null; reload: () => void; showImages: boolean }>({ st: null, reload: () => {}, showImages: true });
+const Ctx = createContext<{ st: Status | null; reload: () => void; showImages: boolean; chain: ChainId }>({ st: null, reload: () => {}, showImages: true, chain: "sol" });
 const useC = () => useContext(Ctx);
 const isClaudia = (key?: string) => key === "sol:2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM";
 
@@ -17,13 +23,13 @@ export default function Claudia({ status, reloadStatus }: { status: Status | nul
   const [showImages, setShowImages] = useState(true);
   useEffect(() => { api("/api/config").then(c => setShowImages(c.showImages)).catch(() => {}); }, []);
   const reload = () => { reloadStatus(); bus.dispatchEvent(new Event("claudia")); };
+  const [chain, setChain] = useState<ChainId>("sol");
+  useEffect(() => { if (status?.chain) setChain(status.chain); }, [status?.chain]);
+  const pick = (c: ChainId) => { setChain(c); api("/api/claudia/chain", { body: { chain: c } }).then(reload).catch(() => {}); };
   return (
-    <Ctx.Provider value={{ st: status, reload, showImages }}>
+    <Ctx.Provider value={{ st: status, reload, showImages, chain }}>
       <PageHead title="Claudia" sub={<span className="hide-phone">$CLAUDIA and the coins launched on <a href={status?.baseUrl || "https://useclaudia.xyz"} target="_blank" rel="noreferrer">{(status?.baseUrl || "https://useclaudia.xyz").replace(/^https?:\/\//, "")}</a>, the thread, and your agent.</span>}>
-        <div className="seg" role="group" aria-label="Chain">
-          <button className="on" aria-pressed="true">Solana</button>
-          <button disabled title="Coming soon">EVM · coming soon</button>
-        </div>
+        <ChainSwitch value={chain} onChange={pick} />
       </PageHead>
       <nav className="tabs">
         <NavLink to="/claudia" end>Overview</NavLink>
@@ -59,8 +65,9 @@ function Problem({ error, retry }: { error: string; retry?: () => void }) {
 
 // ── overview ───────────────────────────────────────────────────────────────
 function Overview() {
-  const { st, showImages } = useC();
+  const { st, showImages, chain } = useC();
   const home = useAsync(() => api("/api/claudia/overview"), [st?.baseUrl]);
+  const hood = useAsync(() => (chain === "hood" ? api<{ coins: any[] }>("/api/claudia/coins?chain=hood") : Promise.resolve(null)), [chain, st?.baseUrl]);
   const props = useAsync(() => api<{ proposals: any[] }>("/api/claudia/proposals"));
   useEffect(() => { const f = () => props.reload(); bus.addEventListener("proposals", f); return () => bus.removeEventListener("proposals", f); });
   const h = home.data;
@@ -77,14 +84,23 @@ function Overview() {
               <div key={p.id} className="item" style={{ alignItems: "flex-start" }}>
                 <span className={`badge ${p.side === "buy" ? "ok" : "bad"}`}>{p.side}</span>
                 <div className="grow">
-                  <div><strong>${p.symbol}</strong> · {p.side === "buy" ? sol(p.amount) : `${p.amount}% of the position`} <span className="tiny muted">{ago(p.ts)}</span></div>
+                  <div><strong>${p.symbol}</strong> · {p.side === "buy" ? native(p.amount, p.unit || "SOL") : `${p.amount}% of the position`}{p.chain === "hood" && <span className="badge">Robinhood</span>} <span className="tiny muted">{ago(p.ts)}</span></div>
                   <div className="small soft mt-4">{p.reason}</div>
+                  {p.origin && !["agent", "user"].includes(p.origin) && <div className="tiny muted mt-4">Prompted by outside content ({p.origin}). Check it yourself.</div>}
                 </div>
                 <Link className="btn sm" to={`/claudia/coin/${encodeURIComponent(p.token)}?side=${p.side}&amount=${p.amount}&mode=live`}>Review</Link>
                 <button className="btn ghost sm" onClick={() => dismiss(p.id)}>Dismiss</button>
               </div>
             ))}
           </div>
+        </div>
+      )}
+      {chain === "hood" && (
+        <div className="card">
+          <div className="card-head"><h2 className="grow">Launched on Claudia · Robinhood Chain <span className="badge">beta</span></h2><Link to="/claudia/coins" className="small">All coins</Link></div>
+          {hood.error && <Problem error={hood.error} retry={hood.reload} />}
+          {hood.data && !hood.data.coins.length && <div className="empty">No Robinhood Chain coins launched on Claudia yet. <Link to="/claudia/launch">Launch one</Link>.</div>}
+          {hood.data && <CoinList coins={hood.data.coins.slice(0, 12)} />}
         </div>
       )}
       {home.error && <Problem error={home.error} retry={home.reload} />}
@@ -151,17 +167,17 @@ function CoinList({ coins }: { coins: any[] }) {
 
 // ── coins ──────────────────────────────────────────────────────────────────
 function Coins() {
-  const { st } = useC();
+  const { st, chain } = useC();
   const [q, setQ] = useState("");
   const [deb, setDeb] = useState("");
   useEffect(() => { const t = setTimeout(() => setDeb(q), 300); return () => clearTimeout(t); }, [q]);
-  const r = useAsync(() => api<{ coins: any[] }>(`/api/claudia/coins?q=${encodeURIComponent(deb)}`), [deb, st?.baseUrl]);
+  const r = useAsync(() => api<{ coins: any[] }>(`/api/claudia/coins?chain=${chain}&q=${encodeURIComponent(deb)}`), [deb, st?.baseUrl, chain]);
   return (
     <div className="card">
       <div className="row" style={{ marginBottom: 12 }}>
-        <input className="input" placeholder="Search coins launched on Claudia (name, ticker or mint)" value={q} onChange={e => setQ(e.target.value)} aria-label="Search coins" />
+        <input className="input" placeholder={chain === "hood" ? "Search Robinhood Chain coins launched on Claudia (name, ticker or 0x address)" : "Search Solana coins launched on Claudia (name, ticker or mint)"} value={q} onChange={e => setQ(e.target.value)} aria-label="Search coins" />
       </div>
-      <p className="tiny muted" style={{ marginBottom: 8 }}>Only $CLAUDIA and coins launched on Claudia are listed here.</p>
+      <p className="tiny muted" style={{ marginBottom: 8 }}>Only {chain === "sol" ? "$CLAUDIA and " : ""}coins launched on Claudia on {CHAIN_NAME[chain]} are listed here.</p>
       {r.error && <Problem error={r.error} retry={r.reload} />}
       {r.data && !r.data.coins.length && <div className="empty">{deb ? "No coin launched on Claudia matches that." : "No coins yet."}</div>}
       {r.data && <CoinList coins={r.data.coins} />}
@@ -173,10 +189,13 @@ function Coin() {
   const { key = "" } = useParams();
   const { st, showImages } = useC();
   const d = useAsync(() => api(`/api/claudia/coin/${encodeURIComponent(key)}`), [key]);
-  const c = d.data;
+  const [liveOn, setLiveOn] = useState(false);
+  const tick = useLivePrice(d.data?.key || "", liveOn);
+  const c = d.data && tick && tick.key === d.data.key ? { ...d.data, ...Object.fromEntries(Object.entries(tick).filter(([, v]) => v !== undefined && v !== null)) } : d.data;
   if (d.error) return <Problem error={d.error} retry={d.reload} />;
   if (!c) return <div className="empty">Loading…</div>;
   const ai = c.agentInfo;
+  const unit = c.unit || UNIT[chainOfKey(c.key)];
   return (
     <div className="grid side-r">
       <div className="col gap-16">
@@ -184,14 +203,17 @@ function Coin() {
           <div className="row gap-12 wrap">
             <CoinImg src={c.image} symbol={c.symbol} base={st?.baseUrl} show={showImages} lg />
             <div className="grow">
-              <div className="row wrap"><h2 style={{ fontSize: 22 }}>${c.symbol}</h2>{isClaudia(c.key) ? <span className="badge brand">Official token</span> : <span className="badge">Launched on Claudia</span>}<span className="badge">{c.phase}</span></div>
+              <div className="row wrap"><h2 style={{ fontSize: 22 }}>${c.symbol}</h2>{isClaudia(c.key) ? <span className="badge brand">Official token</span> : <span className="badge">Launched on Claudia</span>}<span className="badge">{c.phase}</span>{chainOfKey(c.key) === "hood" && <span className="badge">Robinhood Chain · beta</span>}</div>
               <div className="small muted">{c.name}</div>
               <div className="mt-4"><Copyable text={c.address} label={short(c.address, 6)} /></div>
             </div>
-            <button className="btn sm" onClick={d.reload}>Refresh</button>
+            <div className="col gap-4" style={{ alignItems: "flex-end" }}>
+              <button className="btn sm" onClick={d.reload}>Refresh</button>
+              <Switch checked={liveOn} onChange={setLiveOn} label={<span className="tiny">Live price</span>} />
+            </div>
           </div>
           <div className="stats mt-16">
-            <div className="stat"><span className="k">Price</span><span className="v">{usd(c.priceUsd)}</span></div>
+            <div className="stat"><span className="k">Price</span><span className="v">{usd(c.priceUsd)}</span><span className="tiny muted">{native(c.priceNative, unit, 12)}</span></div>
             <div className="stat"><span className="k">Market cap</span><span className="v">{usd(c.mcapUsd)}</span></div>
             <div className="stat"><span className="k">Liquidity</span><span className="v">{usd(c.liquidityUsd)}</span></div>
             <div className="stat"><span className="k">Volume 24 h</span><span className="v">{usd(c.volume24hUsd)}</span></div>
@@ -228,7 +250,7 @@ function Coin() {
             <div className="card-head"><h2>Recent trades</h2></div>
             <div style={{ overflowX: "auto" }}>
               <table className="table">
-                <thead><tr><th>Side</th><th className="r">SOL</th><th className="r">USD</th><th>Trader</th><th className="r">When</th></tr></thead>
+                <thead><tr><th>Side</th><th className="r">{unit}</th><th className="r">USD</th><th>Trader</th><th className="r">When</th></tr></thead>
                 <tbody>{c.recentTrades.slice(0, 12).map((t: any) => (
                   <tr key={t.id}><td className={t.side === "buy" ? "buy" : "sell"}>{t.side}</td><td className="r num">{num(t.amountNative)}</td><td className="r num">{usd(t.amountUsd)}</td><td className="mono small">{short(t.trader)}</td><td className="r tiny muted">{ago(t.ts)}</td></tr>
                 ))}</tbody>
@@ -236,6 +258,7 @@ function Coin() {
             </div>
           </div>
         )}
+        <DataPanel coinKey={c.key} unit={unit} />
       </div>
       <TradePanel coin={c} />
     </div>
@@ -248,19 +271,24 @@ function TradePanel({ coin }: { coin: any }) {
   const toast = useToast();
   const loc = useLocation();
   const params = new URLSearchParams(loc.search);
-  const [mode, setMode] = useState<"paper" | "live">(params.get("mode") === "live" ? "live" : "paper");
+  const chain = chainOfKey(coin.key);
+  const unit = UNIT[chain];
+  const dflt = chain === "hood" ? "0.002" : "0.01";
+  const paperOk = chain === "sol";
+  const [mode, setMode] = useState<"paper" | "live">(params.get("mode") === "live" || !paperOk ? "live" : "paper");
   const [side, setSide] = useState<"buy" | "sell">(params.get("side") === "sell" ? "sell" : "buy");
-  const [amount, setAmount] = useState(params.get("amount") || (side === "buy" ? "0.01" : "50"));
+  const [amount, setAmount] = useState(params.get("amount") || (side === "buy" ? dflt : "50"));
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<any>(null);
   const [quote, setQuote] = useState<any>(null);
-  const [agree, setAgree] = useState(false);
   const [done, setDone] = useState<any>(null);
   const [err, setErr] = useState("");
 
   const n = Number(amount);
   const valid = n > 0 && (side === "buy" || n <= 100);
   const run = async (f: () => Promise<void>) => { setBusy(true); setErr(""); try { await f(); } catch (e) { setErr(errText(e)); } setBusy(false); };
+  const caps = st?.capsLeft?.[chain];
+  const canTrade = chain === "hood" ? !!(st?.evmAddress || st?.hot?.hood?.use) : !!(st?.connected || st?.hot?.sol?.use);
 
   const paperGo = () => run(async () => {
     const r = await api("/api/claudia/paper/trade", { body: { token: coin.key, side, amount: n } });
@@ -268,7 +296,7 @@ function TradePanel({ coin }: { coin: any }) {
     bus.dispatchEvent(new Event("paper"));
   });
   const getQuote = () => run(async () => { setQuote(await api("/api/claudia/quote", { body: { token: coin.key, side, amount: n } })); });
-  const dryRun = () => run(async () => { setDone(null); setAgree(false); setPreview(await api("/api/claudia/trade/preview", { body: { token: coin.key, side, amount: n } })); });
+  const dryRun = () => run(async () => { setDone(null); setPreview(await api("/api/claudia/trade/preview", { body: { token: coin.key, side, amount: n } })); });
   const confirmGo = () => run(async () => {
     const r = await api("/api/claudia/trade/confirm", { body: { previewId: preview.id, confirm: true } });
     setDone(r); setPreview(null); reload();
@@ -278,14 +306,14 @@ function TradePanel({ coin }: { coin: any }) {
     <div className="col gap-16" style={{ position: "sticky", top: 0 }}>
       <div className="card">
         <div className="card-head"><h2 className="grow">Trade ${coin.symbol}</h2>
-          <div className="seg"><button className={mode === "paper" ? "on" : ""} onClick={() => setMode("paper")}>Paper</button><button className={mode === "live" ? "on" : ""} onClick={() => setMode("live")}>Live</button></div>
+          {paperOk && <div className="seg"><button className={mode === "paper" ? "on" : ""} onClick={() => setMode("paper")}>Paper</button><button className={mode === "live" ? "on" : ""} onClick={() => setMode("live")}>Live</button></div>}
         </div>
         <div className="seg" style={{ width: "100%" }}>
-          <button style={{ flex: 1 }} className={side === "buy" ? "on" : ""} onClick={() => { setSide("buy"); setAmount("0.01"); setPreview(null); setQuote(null); }}>Buy</button>
+          <button style={{ flex: 1 }} className={side === "buy" ? "on" : ""} onClick={() => { setSide("buy"); setAmount(dflt); setPreview(null); setQuote(null); }}>Buy</button>
           <button style={{ flex: 1 }} className={side === "sell" ? "on" : ""} onClick={() => { setSide("sell"); setAmount("50"); setPreview(null); setQuote(null); }}>Sell</button>
         </div>
         <div className="fields mt-12">
-          <Field label={side === "buy" ? "Amount (SOL)" : "Amount (% of what you hold)"}>
+          <Field label={side === "buy" ? `Amount (${unit})` : "Amount (% of what you hold)"}>
             <input className="input num" inputMode="decimal" value={amount} onChange={e => { setAmount(e.target.value); setPreview(null); setQuote(null); }} />
           </Field>
           {mode === "paper" ? (
@@ -293,16 +321,18 @@ function TradePanel({ coin }: { coin: any }) {
               <button className={`btn ${side === "buy" ? "buyb" : "sellb"}`} disabled={!valid || busy} onClick={paperGo}>Paper {side}</button>
               <p className="tiny muted">Simulated at the current price. No fees, no slippage, no real SOL. <Link to="/claudia/paper">See your paper account</Link>.</p>
             </>
-          ) : !st?.connected ? (
-            <div className="note">Connect your Claudia agent to get quotes and trade from its wallet. <Link to="/claudia/agent">Connect</Link></div>
+          ) : !canTrade ? (
+            chain === "hood"
+              ? <div className="note">Create or import a Robinhood Chain wallet to get quotes and trade. <Link to="/claudia/agent">Your agent</Link></div>
+              : <div className="note">Connect your Claudia agent to get quotes and trade from its wallet. <Link to="/claudia/agent">Connect</Link></div>
           ) : (
             <>
               <div className="row">
                 <button className="btn grow" disabled={!valid || busy} onClick={getQuote}>Quote</button>
                 <button className="btn primary grow" disabled={!valid || busy} onClick={dryRun}>Dry run</button>
               </div>
-              <p className="tiny muted">A dry run gets a quote, signs it on this computer to check it, and simulates it on your RPC. Nothing is sent. Caps: {st.caps.maxSolPerTrade} SOL per trade, {st.caps.maxSolPerDay} SOL per day ({sol(Math.max(0, st.caps.maxSolPerDay - st.spentToday))} left today).</p>
-              {!st.liveTrading && <div className="note warn small">Live trading is off, so you can dry-run but not send. Switch it on under <Link to="/claudia/agent">Your agent → Limits</Link>.</div>}
+              <p className="tiny muted">A dry run gets a quote, checks the amounts against the token's decimals, signs it on this computer and simulates it. Nothing is sent.{caps && <> Caps on {CHAIN_NAME[chain]}: {native(caps.perTrade, unit)} per trade, {native(caps.perDay, unit)} per day ({native(caps.leftToday, unit)} left today). Sells count by value.</>}</p>
+              {!st?.liveTrading && <div className="note warn small">Live trading is off, so you can dry-run but not send. Switch it on under <Link to="/claudia/agent">Your agent → Limits</Link>.</div>}
             </>
           )}
           {busy && <p className="small muted">Working…</p>}
@@ -311,45 +341,25 @@ function TradePanel({ coin }: { coin: any }) {
         {quote && (
           <div className="mt-12">
             <div className="label">Quote (nothing signed or sent)</div>
-            <QuoteKv q={quote.quote} side={side} amount={n} />
+            <QuoteKv q={quote.quote} side={side} amount={n} unit={quote.unit || unit} />
           </div>
         )}
         {done && <div className="note ok mt-12">Sent and confirmed. {done.explorer.map((u: string) => <a key={u} href={u} target="_blank" rel="noreferrer" className="small" style={{ display: "block" }}>{short(u.split("/").pop(), 8)}</a>)}</div>}
       </div>
-      {preview && (
-        <Modal title={`Confirm: ${side} ${side === "buy" ? sol(n) + " of" : n + "% of"} $${preview.symbol}`} onClose={() => setPreview(null)}>
-          <QuoteKv q={preview.quote} side={side} amount={n} />
-          <div className="kv mt-12">
-            <span>Network</span><span>{preview.network === "mainnet" ? <strong className="sell">mainnet, real SOL</strong> : "devnet (test SOL)"}</span>
-            <span>Wallet</span><span className="mono small">{short(preview.signer, 6)} · {sol(preview.balanceSol)}</span>
-            <span>Simulation</span><span>{preview.simulation.ok === true ? <span className="buy">passed</span> : preview.simulation.ok === false ? <span className="sell">would fail</span> : <span className="muted">couldn't run</span>}</span>
-            <span>Transactions</span><span>{preview.txCount}, signed on this computer</span>
-          </div>
-          {preview.simulation.error && <p className="small muted mt-8 break">{preview.simulation.error}</p>}
-          {preview.warnings.map((w: string, i: number) => <div key={i} className="note warn small mt-8">{w}</div>)}
-          <label className="row mt-16 small"><input type="checkbox" checked={agree} onChange={e => setAgree(e.target.checked)} /> I understand this {side === "buy" ? "spends" : "sells for"} real SOL and can't be undone.</label>
-          {err && <p className="error mt-8">{err}</p>}
-          <div className="row mt-16">
-            <button className="btn ghost" onClick={() => setPreview(null)}>Cancel</button>
-            <button className={`btn grow ${side === "buy" ? "buyb" : "sellb"}`} disabled={!agree || busy || !preview.liveTrading || preview.simulation.ok === false} onClick={confirmGo}>{busy ? "Sending…" : `Confirm ${side}`}</button>
-          </div>
-          {!preview.liveTrading && <p className="tiny muted mt-8">Live trading is off, so this dry run can't be sent.</p>}
-          <p className="tiny muted mt-8">This preview expires in a minute.</p>
-        </Modal>
-      )}
+      {preview && <TradeConfirm p={preview} busy={busy} err={err} onConfirm={confirmGo} onClose={() => setPreview(null)} />}
     </div>
   );
 }
 
-function QuoteKv({ q, side, amount }: { q: any; side: string; amount: number }) {
+function QuoteKv({ q, side, amount, unit }: { q: any; side: string; amount: number; unit: string }) {
   return (
     <div className="kv small mt-4">
-      {side === "buy" ? <><span>You spend</span><span className="num">{sol(q.amountIn ?? amount)}</span><span>You get about</span><span className="num">{num(q.expectedOut)} tokens (at least {num(q.minOut)})</span></>
-        : <><span>You sell</span><span className="num">{amount}%{q.balanceTokens !== undefined ? ` (${num(q.balanceTokens * amount / 100)} tokens)` : ""}</span><span>You get about</span><span className="num">{sol(q.expectedOut)} (at least {sol(q.minOut)})</span></>}
+      {side === "buy" ? <><span>You spend</span><span className="num">{native(q.amountIn ?? amount, unit)}</span><span>You get about</span><span className="num">{num(q.expectedOut)} tokens (at least {num(q.minOut)})</span></>
+        : <><span>You sell</span><span className="num">{amount}%{q.balanceTokens !== undefined ? ` (${num(q.balanceTokens * amount / 100)} tokens)` : ""}</span><span>You get about</span><span className="num">{native(q.expectedOut, unit)} (at least {native(q.minOut, unit)})</span></>}
       <span>Price impact</span><span className="num">{pct(q.priceImpactPct)}</span>
-      <span>Fees</span><span className="num">{sol(q.feeNative, 6)}{q.taxPct ? ` · tax ${q.taxPct}%` : ""}</span>
+      <span>Fees</span><span className="num">{native(q.feeNative, unit)}{q.taxPct ? ` · tax ${q.taxPct}%` : ""}</span>
       <span>Route</span><span>{q.route}</span>
-      {(q.warnings || []).map((w: string, i: number) => <><span key={"k" + i}>Note</span><span key={"v" + i}>{w}</span></>)}
+      {(q.warnings || []).map((w: string, i: number) => <Fragment key={i}><span>Note</span><span>{w}</span></Fragment>)}
     </div>
   );
 }
@@ -533,7 +543,9 @@ function YourAgent() {
         )}
       </div>
 
+      <EvmWalletCard />
       <Limits />
+      <HotWallets />
       {st.connected && <ConnectionCard />}
     </div>
   );
@@ -543,22 +555,24 @@ function Connect() {
   const { reload } = useC();
   const toast = useToast();
   const home = useAsync(() => api("/api/claudia/home"));
-  const [mode, setMode] = useState<"home" | "new" | "manual">("home");
+  const { st } = useC();
+  const [mode, setMode] = useState<"one" | "home" | "new" | "manual">("one");
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const h = home.data;
-  useEffect(() => { if (h && !h.found) setMode("new"); }, [h]);
   const run = async (f: () => Promise<void>) => { setBusy(true); setErr(""); try { await f(); reload(); } catch (e) { setErr(errText(e)); } setBusy(false); };
 
   return (
     <div className="card">
       <div className="card-head"><h2>Connect your Claudia agent</h2><p>Your agent posts and trades on Claudia with an API key and a device key. Both are stored encrypted here.</p></div>
       <div className="tabs" style={{ marginBottom: 16 }}>
+        <button className={mode === "one" ? "on" : ""} onClick={() => setMode("one")}>One click</button>
         <button className={mode === "home" ? "on" : ""} onClick={() => setMode("home")}>Use my claudia CLI setup</button>
-        <button className={mode === "new" ? "on" : ""} onClick={() => setMode("new")}>Set up here</button>
+        <button className={mode === "new" ? "on" : ""} onClick={() => setMode("new")}>Connect manually</button>
         <button className={mode === "manual" ? "on" : ""} onClick={() => setMode("manual")}>Enter keys</button>
       </div>
+      {mode === "one" && <OneClick baseUrl={st?.baseUrl} onConnected={() => reload()} />}
       {mode === "home" && (
         <div className="fields">
           {!h ? <p className="muted small">Looking for ~/.claudia…</p> : !h.found ? (
@@ -707,31 +721,40 @@ function ExportWallet() {
 function Limits() {
   const { st, reload } = useC();
   const toast = useToast();
-  const [t, setT] = useState(String(st?.caps.maxSolPerTrade ?? 0.05));
-  const [d, setD] = useState(String(st?.caps.maxSolPerDay ?? 0.2));
+  const caps = st?.caps;
+  const [f, setF] = useState({ st: "", sd: "", et: "", ed: "" });
   const [confirmLive, setConfirmLive] = useState(false);
-  useEffect(() => { if (st) { setT(String(st.caps.maxSolPerTrade)); setD(String(st.caps.maxSolPerDay)); } }, [st?.caps.maxSolPerTrade, st?.caps.maxSolPerDay]); // eslint-disable-line react-hooks/exhaustive-deps
-  if (!st) return null;
+  useEffect(() => { if (caps) setF({ st: String(caps.maxSolPerTrade), sd: String(caps.maxSolPerDay), et: String(caps.maxEthPerTrade), ed: String(caps.maxEthPerDay) }); }, [caps?.maxSolPerTrade, caps?.maxSolPerDay, caps?.maxEthPerTrade, caps?.maxEthPerDay]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!st || !caps) return null;
   const save = async (patch: any) => { try { await api("/api/config", { body: { claudia: patch } }); reload(); toast("Saved", "ok"); } catch (e) { toast(errText(e), "bad"); } };
+  const changed = Number(f.st) !== caps.maxSolPerTrade || Number(f.sd) !== caps.maxSolPerDay || Number(f.et) !== caps.maxEthPerTrade || Number(f.ed) !== caps.maxEthPerDay;
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+  const left = st.capsLeft;
   return (
     <div className="card">
-      <div className="card-head"><h2>Limits</h2><p>Checked on this computer before anything is signed.</p></div>
+      <div className="card-head"><h2>Limits</h2><p>Checked on this computer before anything is signed, per chain, in that chain's coin. Sells count by what they bring back, against the same per-trade cap and their own daily allowance.</p></div>
+      <div className="label">Solana</div>
       <div className="fields two">
-        <Field label="Most SOL per trade"><input className="input num" inputMode="decimal" value={t} onChange={e => setT(e.target.value)} /></Field>
-        <Field label="Most SOL per day" hint={`Spent today: ${sol(st.spentToday)}`}><input className="input num" inputMode="decimal" value={d} onChange={e => setD(e.target.value)} /></Field>
+        <Field label="Most SOL per trade"><input className="input num" inputMode="decimal" value={f.st} onChange={set("st")} /></Field>
+        <Field label="Most SOL per day" hint={left ? `Today: ${native(left.sol.spentToday, "SOL")} spent, ${native(left.sol.soldToday, "SOL")} sold` : undefined}><input className="input num" inputMode="decimal" value={f.sd} onChange={set("sd")} /></Field>
       </div>
-      <div className="row mt-12"><button className="btn" disabled={Number(t) === st.caps.maxSolPerTrade && Number(d) === st.caps.maxSolPerDay} onClick={() => save({ caps: { maxSolPerTrade: Number(t), maxSolPerDay: Number(d) } })}>Save limits</button></div>
+      <div className="label mt-12">Robinhood Chain (beta)</div>
+      <div className="fields two">
+        <Field label="Most ETH per trade"><input className="input num" inputMode="decimal" value={f.et} onChange={set("et")} /></Field>
+        <Field label="Most ETH per day" hint={left ? `Today: ${native(left.hood.spentToday, "ETH")} spent, ${native(left.hood.soldToday, "ETH")} sold` : undefined}><input className="input num" inputMode="decimal" value={f.ed} onChange={set("ed")} /></Field>
+      </div>
+      <div className="row mt-12"><button className="btn" disabled={!changed} onClick={() => save({ caps: { maxSolPerTrade: Number(f.st), maxSolPerDay: Number(f.sd), maxEthPerTrade: Number(f.et), maxEthPerDay: Number(f.ed) } })}>Save limits</button></div>
       <hr className="hr" />
       <div className="row top">
         <div className="grow">
           <div>Live trading</div>
-          <div className="small muted">Lets you send real buys, sells and launches after a dry run. Your agent still can't trade on its own; it can only suggest. Off by default.</div>
+          <div className="small muted">Lets you send real buys, sells and launches after a dry run, on every chain. Your agent still can't trade on its own; it can only suggest. Off by default.</div>
         </div>
         <Switch checked={st.liveTrading} onChange={v => (v ? setConfirmLive(true) : save({ liveTrading: false }))} />
       </div>
       {confirmLive && (
         <Modal title="Switch on live trading?" onClose={() => setConfirmLive(false)}>
-          <p className="soft">Live trades spend real SOL from your agent wallet on mainnet. Coins like these can go to zero. Every trade still needs a dry run and your confirmation, inside your limits ({st.caps.maxSolPerTrade} SOL per trade, {st.caps.maxSolPerDay} SOL per day).</p>
+          <p className="soft">Live trades spend real SOL or ETH from your wallets on mainnet. Coins like these can go to zero. Every trade still needs a dry run and your confirmation, inside your limits ({native(caps.maxSolPerTrade, "SOL")} / {native(caps.maxEthPerTrade, "ETH")} per trade, {native(caps.maxSolPerDay, "SOL")} / {native(caps.maxEthPerDay, "ETH")} per day).</p>
           <div className="row mt-16"><button className="btn ghost" onClick={() => setConfirmLive(false)}>Keep it off</button><button className="btn primary grow" onClick={() => { setConfirmLive(false); save({ liveTrading: true }); }}>Switch on</button></div>
         </Modal>
       )}
@@ -745,8 +768,9 @@ function ConnectionCard() {
   const nav = useNavigate();
   const [base, setBase] = useState(st?.baseUrl || "");
   const [rpc, setRpc] = useState(st?.rpcUrl || "");
+  const [hoodRpc, setHoodRpc] = useState(st?.hoodRpcUrl || "");
   if (!st) return null;
-  const save = async () => { try { await api("/api/claudia/connect", { body: { baseUrl: base, rpcUrl: rpc } }); reload(); toast("Saved", "ok"); } catch (e) { toast(errText(e), "bad"); } };
+  const save = async () => { try { await api("/api/claudia/connect", { body: { baseUrl: base, rpcUrl: rpc, hoodRpcUrl: hoodRpc } }); reload(); toast("Saved", "ok"); } catch (e) { toast(errText(e), "bad"); } };
   const disconnect = async () => {
     if (!confirm("Disconnect your Claudia agent? The API key and device key are removed from this app. The agent wallet stays.")) return;
     await api("/api/claudia/disconnect", { body: { keepWallet: true } });
@@ -758,64 +782,95 @@ function ConnectionCard() {
       <div className="fields">
         <Field label="Claudia address"><input className="input mono" value={base} onChange={e => setBase(e.target.value)} /></Field>
         <Field label="Solana RPC" hint="Empty uses the public RPC for Claudia's network."><input className="input mono" placeholder="https://…" value={rpc} onChange={e => setRpc(e.target.value)} /></Field>
-        <div className="row"><button className="btn" disabled={base === st.baseUrl && rpc === st.rpcUrl} onClick={save}>Save</button><button className="btn danger right" onClick={disconnect}>Disconnect</button></div>
+        <Field label="Robinhood Chain RPC" hint="Empty uses the public Robinhood Chain RPC (rate limited)."><input className="input mono" placeholder="https://…" value={hoodRpc} onChange={e => setHoodRpc(e.target.value)} /></Field>
+        <div className="row"><button className="btn" disabled={base === st.baseUrl && rpc === st.rpcUrl && hoodRpc === (st.hoodRpcUrl || "")} onClick={save}>Save</button><button className="btn danger right" onClick={disconnect}>Disconnect</button></div>
       </div>
     </div>
   );
 }
 
 // ── launch ─────────────────────────────────────────────────────────────────
+type Img = { path: string; name: string; source: "uploads" | "library" | "workspace"; size: number; modified: number };
+const SOURCE: Record<string, string> = { uploads: "Uploads", library: "Media library", workspace: "Workspace" };
+
 function Launch() {
-  const { st, reload } = useC();
-  const [f, setF] = useState({ name: "", symbol: "", description: "", image: "", devBuy: "0", twitter: "", telegram: "", website: "" });
+  const { st, reload, chain } = useC();
+  const unit = UNIT[chain];
+  const [f, setF] = useState({ name: "", symbol: "", description: "", image: "", devBuy: "0", twitter: "", telegram: "", website: "", launchpad: "pons" });
   const [preview, setPreview] = useState<any>(null);
   const [agree, setAgree] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [done, setDone] = useState<any>(null);
-  const images = useAsync(() => api<{ results: any[] }>("/api/files?path=/&search=.").then(r => [...new Set(r.results.map((x: any) => x.path).filter((p: string) => /\.(png|jpe?g|gif|webp)$/i.test(p)))] as string[]).catch(() => [] as string[]));
+  const images = useAsync(() => api<{ images: Img[] }>("/api/claudia/launch/images").then(r => r.images).catch(() => [] as Img[]));
+  const pads = useLaunchpads(chain);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
-  if (!st?.connected) return <div className="note">Launching needs a connected Claudia agent with a passport. <Link to="/claudia/agent">Connect your agent</Link></div>;
+  const pad = chain === "hood" ? (pads.data || []).find((p: any) => p.id === f.launchpad) : null;
+  const ready = chain === "hood" ? !!st?.evmAddress : !!st?.connected;
+  if (!ready) {
+    return chain === "hood"
+      ? <div className="note">Robinhood Chain launches use your own 0x wallet as the creator. <Link to="/claudia/agent">Create or import a Robinhood Chain wallet</Link> first.</div>
+      : <div className="note">Launching on Solana needs a connected Claudia agent with a passport. <Link to="/claudia/agent">Connect your agent</Link></div>;
+  }
   const run = async (fn: () => Promise<void>) => { setBusy(true); setErr(""); try { await fn(); } catch (e) { setErr(errText(e)); } setBusy(false); };
+  const picked = (images.data || []).find(i => i.path === f.image);
+  const caps = st?.capsLeft?.[chain];
   return (
     <div className="grid side-r">
       <div className="card">
-        <div className="card-head"><h2>Launch a coin with your agent</h2><p>On Solana through Claudia. The creator share of fees goes to your agent wallet.</p></div>
+        <div className="card-head"><h2>Launch a coin on {CHAIN_NAME[chain]}{chain === "hood" && <span className="badge">beta</span>}</h2><p>{chain === "hood" ? "Through Claudia, with your Robinhood Chain wallet as the creator. Creator fees split 70/30 on-chain." : "On pump.fun through Claudia. The creator share of fees goes to your agent wallet."}</p></div>
         <div className="fields">
+          {chain === "hood" && (
+            <Field label="Launchpad" hint={pad ? pad.feeRoute : undefined}>
+              <select className="select" value={f.launchpad} onChange={set("launchpad")}>
+                {(pads.data || []).map((p: any) => <option key={p.id} value={p.id} disabled={!p.open}>{p.name}{p.open ? "" : " (closed)"}{p.devBuy ? "" : " · no first buy"}</option>)}
+              </select>
+            </Field>
+          )}
           <div className="fields two">
             <Field label="Name" hint="Up to 32 bytes."><input className="input" value={f.name} onChange={set("name")} /></Field>
-            <Field label="Ticker" hint="A–Z and 0–9, up to 13."><input className="input mono" value={f.symbol} onChange={e => setF({ ...f, symbol: e.target.value.toUpperCase() })} /></Field>
+            <Field label="Ticker" hint={chain === "hood" ? "A–Z and 0–9, up to 16." : "A–Z and 0–9, up to 13."}><input className="input mono" value={f.symbol} onChange={e => setF({ ...f, symbol: e.target.value.toUpperCase() })} /></Field>
           </div>
           <Field label="Description"><textarea className="textarea" value={f.description} onChange={set("description")} maxLength={500} /></Field>
-          <Field label="Picture" hint="A PNG, JPEG, GIF or WEBP from your workspace, or an https:// link. Max 4 MB.">
-            <input className="input mono" list="ws-images" placeholder="/pictures/coin.png or https://…" value={f.image} onChange={set("image")} />
-            <datalist id="ws-images">{(images.data || []).map(p => <option key={p} value={p} />)}</datalist>
+          <Field label="Picture" hint="From your uploads, the media library or the workspace (Files → Upload picture), or an https:// link. PNG, JPEG, GIF or WEBP, max 4 MB.">
+            <select className="select" value={picked ? f.image : ""} onChange={e => setF({ ...f, image: e.target.value })}>
+              <option value="">{(images.data || []).length ? "Pick a picture…" : "No pictures yet"}</option>
+              {(["uploads", "library", "workspace"] as const).map(src => {
+                const list = (images.data || []).filter(i => i.source === src);
+                return list.length ? <optgroup key={src} label={SOURCE[src]}>{list.map(i => <option key={i.path} value={i.path}>{i.name}</option>)}</optgroup> : null;
+              })}
+            </select>
+            <input className="input mono mt-8" placeholder="…or https://" value={picked ? "" : f.image} onChange={set("image")} />
+            {picked && <img src={fileUrl(picked.path)} alt="" style={{ width: 96, height: 96, objectFit: "cover", borderRadius: 8, marginTop: 8 }} />}
           </Field>
-          <Field label="First buy (SOL)" hint={`Optional. Counts toward your caps (${st.caps.maxSolPerTrade} SOL per trade).`}><input className="input num" inputMode="decimal" value={f.devBuy} onChange={set("devBuy")} /></Field>
+          {(chain === "sol" || pad?.devBuy) && <Field label={`First buy (${unit})`} hint={caps ? `Optional. Counts toward your caps (${native(caps.perTrade, unit)} per trade, ${native(caps.leftToday, unit)} left today).` : undefined}><input className="input num" inputMode="decimal" value={f.devBuy} onChange={set("devBuy")} /></Field>}
           <div className="fields two">
             <Field label="X / Twitter (optional)"><input className="input" value={f.twitter} onChange={set("twitter")} /></Field>
             <Field label="Telegram (optional)"><input className="input" value={f.telegram} onChange={set("telegram")} /></Field>
           </div>
           <Field label="Website (optional)"><input className="input" value={f.website} onChange={set("website")} /></Field>
-          <button className="btn primary" disabled={busy || !f.name || !f.symbol || !f.image} onClick={() => run(async () => { setDone(null); setAgree(false); setPreview(await api("/api/claudia/launch/preview", { body: { ...f, devBuy: Number(f.devBuy) || 0 } })); })}>{busy ? "Planning…" : "Dry run"}</button>
+          <button className="btn primary" disabled={busy || !f.name || !f.symbol || !f.image} onClick={() => run(async () => { setDone(null); setAgree(false); setPreview(await api("/api/claudia/launch/preview", { body: { ...f, chain, devBuy: Number(f.devBuy) || 0 } })); })}>{busy ? "Planning…" : "Upload picture and plan"}</button>
           {err && <p className="error">{err}</p>}
-          {done && <div className="note ok">Launched{done.mint ? <> · <Link to={`/claudia/coin/sol:${done.mint}`}>open the coin</Link></> : ""}. {done.explorer.map((u: string) => <a key={u} className="small" style={{ display: "block" }} href={u} target="_blank" rel="noreferrer">{short(u.split("/").pop(), 8)}</a>)}</div>}
+          {done && <div className="note ok">Launched{done.token ? <> · <Link to={`/claudia/coin/${encodeURIComponent(done.token)}`}>open the coin</Link></> : ""}. {done.explorer.map((u: string) => <a key={u} className="small" style={{ display: "block" }} href={u} target="_blank" rel="noreferrer">{short(u.split("/").pop(), 8)}</a>)}</div>}
         </div>
       </div>
-      <div className="note">A dry run uploads the picture, asks Claudia to plan the launch, and signs it on this computer to check it. Nothing is sent until you confirm, and the plan expires after a minute.</div>
+      <div className="note">Planning uploads the picture and the coin's details to Claudia (they become public when the coin launches), then Claudia plans the launch and this computer checks it. Nothing goes on-chain until you confirm, and the plan expires after a minute.</div>
       {preview && (
         <Modal title={`Launch $${preview.symbol}?`} onClose={() => setPreview(null)}>
           <div className="kv small">
+            <span>Chain</span><span>{preview.chainName}{preview.chain === "hood" ? " (beta)" : ""} · {preview.launchpadName}</span>
             <span>Coin</span><span>{preview.name} (${preview.symbol})</span>
-            <span>Mint</span><span className="mono">{short(preview.mint, 6) || "–"}</span>
-            <span>First buy</span><span>{preview.devBuy ? `${sol(preview.devBuy)} → about ${num(preview.devBuyPreview?.tokensOut)} tokens` : "none"}</span>
-            <span>Total cost</span><span className="num">about {sol(preview.fees.totalNative)}</span>
-            <span>Creator fees</span><span>{preview.split.creatorPct}% to your agent wallet · {preview.split.platformPct}% to Claudia</span>
-            <span>Network</span><span>{preview.network === "mainnet" ? <strong className="sell">mainnet, real SOL</strong> : "devnet (test SOL)"}</span>
+            <span>Address</span><span className="mono">{short(preview.mint, 6) || "–"}</span>
+            <span>First buy</span><span>{preview.devBuy ? `${native(preview.devBuy, preview.unit)} → about ${num(preview.devBuyPreview?.tokensOut)} tokens` : "none"}</span>
+            <span>Total cost</span><span className="num">about {native(preview.fees.totalNative, preview.unit)}</span>
+            <span>Caps left today</span><span className="num">{native(preview.caps?.leftToday, preview.unit)} of {native(preview.caps?.perDay, preview.unit)}</span>
+            <span>Creator fees</span><span>{preview.split.creatorPct}% to your wallet · {preview.split.platformPct}% to Claudia</span>
+            <span>Wallet</span><span className="mono">{short(preview.signer, 6)} · {native(preview.balanceNative, preview.unit, 4)}</span>
+            <span>Network</span><span>{preview.network === "mainnet" ? <strong className="sell">mainnet, real {preview.unit}</strong> : `devnet (test ${preview.unit})`}</span>
             <span>Simulation</span><span>{!preview.simulation ? "not run" : preview.simulation.ok ? <span className="buy">passed</span> : <span className="sell">{preview.simulation.error || "failed"}</span>}</span>
           </div>
           {preview.warnings.map((w: string, i: number) => <div key={i} className="note warn small mt-8">{w}</div>)}
-          <label className="row mt-16 small"><input type="checkbox" checked={agree} onChange={e => setAgree(e.target.checked)} /> I understand this spends real SOL and can't be undone.</label>
+          <label className="row mt-16 small"><input type="checkbox" checked={agree} onChange={e => setAgree(e.target.checked)} /> I understand this spends real {preview.unit} and can't be undone.</label>
           {err && <p className="error mt-8">{err}</p>}
           <div className="row mt-16">
             <button className="btn ghost" onClick={() => setPreview(null)}>Cancel</button>

@@ -1,0 +1,12 @@
+node_modules
+dashboard/dist
+.git
+.github
+docs
+native
+*.tgz
+.env
+.env.*
+*.key
+*.pem
+.claudia-local

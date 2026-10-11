@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, bus, errText } from "../lib";
 import { Markdown } from "../md";
 import { PageHead, useToast } from "../ui";
+import { fileUrl } from "../studio";
 
 type Entry = { name: string; path: string; isDirectory: boolean; size: number; modified: number };
 type Open = { path: string; content: string; size: number; binary: boolean };
@@ -49,6 +50,21 @@ export default function Files() {
     try { setHits((await api(`/api/files?path=/&search=${encodeURIComponent(search)}`)).results); } catch (e) { toast(errText(e), "bad"); }
   };
 
+  const picker = useRef<HTMLInputElement>(null);
+  const uploadPictures = async (files: FileList | null) => {
+    for (const f of Array.from(files || [])) {
+      const p = (dir === "/" ? "" : dir) + "/" + f.name.replace(/[\/\\]/g, "_");
+      try {
+        const res = await fetch(`/api/files/upload?path=${encodeURIComponent(p)}`, { method: "POST", headers: { "Content-Type": f.type || "application/octet-stream" }, body: f, credentials: "same-origin" });
+        const d = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(d?.error || `Upload failed (${res.status})`);
+        toast(`Uploaded ${d.path}`, "ok");
+      } catch (e) { toast(errText(e), "bad"); }
+    }
+    if (picker.current) picker.current.value = "";
+    load();
+  };
+
   const parts = dir.split("/").filter(Boolean);
   const dirty = open && draft !== open.content;
 
@@ -64,6 +80,8 @@ export default function Files() {
           <div className="row" style={{ marginBottom: 10 }}>
             <button className="btn sm" onClick={() => create(false)}>New file</button>
             <button className="btn sm" onClick={() => create(true)}>New folder</button>
+            <button className="btn sm" onClick={() => picker.current?.click()}>Upload picture</button>
+            <input ref={picker} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={e => uploadPictures(e.target.files)} />
           </div>
           <div className="list">
             {dir !== "/" && <a className="item" href="#" onClick={e => { e.preventDefault(); setDir("/" + parts.slice(0, -1).join("/")); }}><span className="muted">..</span></a>}
@@ -104,7 +122,8 @@ export default function Files() {
                 {/\.md$/i.test(open.path) && <div className="seg"><button className={!preview ? "on" : ""} onClick={() => setPreview(false)}>Edit</button><button className={preview ? "on" : ""} onClick={() => setPreview(true)}>Preview</button></div>}
                 <button className="btn primary sm" disabled={!dirty || open.binary} onClick={save}>{dirty ? "Save" : "Saved"}</button>
               </div>
-              {open.binary ? <div className="empty">This is a binary file ({size(open.size)}). It can't be edited here.</div>
+              {open.binary && /\.(png|jpe?g|gif|webp)$/i.test(open.path) ? <div className="col gap-8"><img src={fileUrl(open.path)} alt="" style={{ maxWidth: "100%", maxHeight: 420, objectFit: "contain", borderRadius: 8 }} /><span className="tiny muted">{size(open.size)}</span></div>
+                : open.binary ? <div className="empty">This is a binary file ({size(open.size)}). It can't be edited here.</div>
                 : preview ? <div style={{ minHeight: 300 }}><Markdown text={draft} /></div>
                 : <textarea className="editor" spellCheck={false} value={draft} onChange={e => setDraft(e.target.value)} aria-label="File contents" />}
             </>

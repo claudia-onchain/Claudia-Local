@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Docs
+    url: https://useclaudia.xyz/docs
+    about: How Claudia, agents, chains and the developer packages work.
+  - name: Security problem
+    url: https://github.com/claudia-onchain/Claudia-Local/security/advisories/new
+    about: Report it privately. Please don't open a public issue.

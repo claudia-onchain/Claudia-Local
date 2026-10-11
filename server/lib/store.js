@@ -1,10 +1,16 @@
 /**
- * store.js — small JSON files in the data folder, written atomically with 0600 permissions.
+ * store.js — settings, chats, memory, usage and the activity log, all in the data folder.
  * Nothing in here is secret: keys live in the vault (vault.js).
+ *
+ *   JSON files   written atomically with 0600 permissions (config, usage, activity, …)
+ *   chats        SQLite (db.js) when node:sqlite is available; chats.json is moved in once
+ *   memory       Markdown files (memory.js): MEMORY.md, USER.md, daily notes; memory.json is moved in once
  */
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { P, ensureHome } from "./paths.js";
+import { P, ensureHome, replaceFile } from "./paths.js";
+import * as D from "./db.js";
+import * as mem from "./memory.js";
 
 const cache = new Map();
 
@@ -23,7 +29,7 @@ export function writeJsonFile(file, data) {
   const tmp = `${file}.${process.pid}.${Date.now()}.${randomBytes(3).toString("hex")}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
   try { chmodSync(tmp, 0o600); } catch { /* */ }
-  renameSync(tmp, file);
+  replaceFile(tmp, file);
   cache.set(file, data);
 }
 
@@ -33,8 +39,8 @@ export const newId = (prefix = "") => prefix + Date.now().toString(36) + randomB
 export const ROLES = ["research", "market", "risk", "security", "wallet", "trader"];
 
 export const DEFAULT_CONFIG = {
-  version: 1,
-  // Empty means "use the default model" (see model.js). The UI never shows the default id.
+  version: 2,
+  // 0.2 settings, kept so old files read cleanly. 0.3 keeps models per provider under `chat`.
   model: "",
   roleModels: { research: "", market: "", risk: "", security: "", wallet: "", trader: "" },
   temperature: 0.6,
@@ -42,11 +48,18 @@ export const DEFAULT_CONFIG = {
   tone: "plain",
   tools: {},              // tool name -> false to switch it off (see agent.js for defaults)
   askBeforePost: true,    // the agent must ask before it posts in the Claudia thread
-  autoLockMinutes: 0,     // 0 = stay unlocked until you lock or quit
+  autoLockMinutes: 30,    // 0 = stay unlocked until you lock or quit (0.2 setups keep what they had)
   showImages: true,       // coin pictures come from the coin's own image host
-  // Which OpenAI-compatible server the agent chats through (presets in providers.js → CHAT_PRESETS).
-  // `model` above stays the OpenRouter model; other providers keep their model id in chat.models.
-  chat: { provider: "openrouter", baseUrl: "", models: {} },
+  // Which provider the agent chats through (presets in providers.js → CHAT_PRESETS). Empty = none yet:
+  // there is no default model, the dashboard asks you to add a key. Everything is kept per provider:
+  //   models[p]        main model            roleModels[p]  { helpers, tasks } (empty = main model)
+  //   helperModels[p]  { research, … } per helper        caps[p]  monthly USD cap (estimate), 0 = none
+  //   fallback         { provider, model } tried once when the main model fails after retries
+  chat: { provider: "", baseUrl: "", models: {}, roleModels: {}, helperModels: {}, fallback: { provider: "", model: "" }, caps: {} },
+  // First-run wizard: true while it still has steps to show (set by setup and "Run setup again").
+  wizardPending: false,
+  // MCP servers the agent can use (Settings → MCP). Built-in Claudia entries are added by mcp-client.js.
+  mcpClients: { servers: [] },
   studio: {
     // Spending caps handed to @useclaudia/media (US dollars). Jobs above approveAboveUsd wait for you.
     limits: { perJobUsd: 2, perDayUsd: 10, perMonthUsd: 50, approveAboveUsd: 0.5 },
@@ -59,14 +72,29 @@ export const DEFAULT_CONFIG = {
     // Built-in MCP server for Claude Desktop, Claude Code, Cursor (off by default). tokenHash = SHA-256.
     mcp: { enabled: false, port: 3940, tokenHash: "", tokenHint: "" },
   },
+  // Tasks, heartbeat, budgets, kill switch and Telegram (tasks.js, telegram.js). Edited through /api/autonomy.
+  autonomy: {
+    stopped: false,
+    budgets: { runsPerDay: 48, toolCallsPerDay: 400, postsPerDay: 10, tokensPerDay: 1500000, usdPerDay: 0 },
+    heartbeat: { enabled: false, everyMinutes: 60, telegram: true },
+    telegram: { enabled: false, owners: [] },
+  },
+  persona: null,          // { template, niche, text } from a template (templates.js)
+  template: null,         // { id, niche, appliedAt }
+  pendingSkills: [],      // skill slugs a template wanted while the skills library wasn't available
   claudia: {
     baseUrl: "https://useclaudia.xyz",
     rpcUrl: "",
     source: "",           // "" | "manual" | "claudia-home"
     agent: null,          // cached /api/v1/me (display only)
-    caps: { maxSolPerTrade: 0.05, maxSolPerDay: 0.2 },
+    // Per chain, in the chain's own coin. Sells are capped by value too (see policy.js).
+    caps: { maxSolPerTrade: 0.05, maxSolPerDay: 0.2, maxEthPerTrade: 0.01, maxEthPerDay: 0.04 },
     liveTrading: false,   // live buys, sells and launches stay off until you switch them on
     room: "general",
+    chain: "sol",         // the chain picked on the Claudia page: sol | hood (bsc is coming soon)
+    hoodRpcUrl: "",       // Robinhood Chain RPC; empty uses the public one
+    hot: { sol: false, hood: false }, // trade from a separate small hot wallet on this chain
+    mainWallet: { sol: "", hood: "" }, // where "Sweep back" sends the hot wallet's balance (default: the agent wallet)
   },
 };
 
@@ -80,7 +108,23 @@ function merge(base, patch) {
 }
 
 export function getConfig() {
-  return merge(structuredClone(DEFAULT_CONFIG), structuredClone(readJsonFile(P.config, {})));
+  const raw = readJsonFile(P.config, {});
+  if (raw.version === 1) return migrateConfig(raw);
+  return merge(structuredClone(DEFAULT_CONFIG), structuredClone(raw));
+}
+
+/** 0.2 → 0.3, once: the OpenRouter model and the helper models move under chat, per provider. */
+function migrateConfig(raw) {
+  const c = merge(structuredClone(DEFAULT_CONFIG), structuredClone(raw));
+  const prov = c.chat.provider || "openrouter";
+  c.chat.provider = prov;
+  if (c.model && !c.chat.models.openrouter) c.chat.models.openrouter = c.model;
+  const helpers = Object.fromEntries(Object.entries(raw.roleModels || {}).filter(([, v]) => v));
+  if (Object.keys(helpers).length) c.chat.helperModels[prov] = { ...helpers, ...(c.chat.helperModels[prov] || {}) };
+  c.model = "";
+  c.roleModels = { ...DEFAULT_CONFIG.roleModels };
+  c.version = 2;
+  return saveConfig(c);
 }
 
 export function saveConfig(next) {
@@ -105,7 +149,8 @@ const chatBaseUrl = (v) => {
   if (!s) return "";
   let u;
   try { u = new URL(s); } catch { throw Object.assign(new Error("The chat server address isn't a valid URL."), { status: 400 }); }
-  const local = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+  // In the Docker image, host.docker.internal is this computer (Ollama or LM Studio running outside the container).
+  const local = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) || (process.env.CLAUDIA_LOCAL_DOCKER === "1" && u.hostname === "host.docker.internal");
   if (u.protocol !== "https:" && !(u.protocol === "http:" && local)) throw Object.assign(new Error("The chat server address must start with https:// (or http://localhost for a server on this machine)."), { status: 400 });
   if (u.username || u.password) throw Object.assign(new Error("Put the key in the key field, not in the address."), { status: 400 });
   return s;
@@ -115,8 +160,15 @@ const chatBaseUrl = (v) => {
 export function updateConfig(patch) {
   const c = getConfig();
   const p = patch || {};
-  if ("model" in p) c.model = modelId(p.model);
-  if (p.roleModels && typeof p.roleModels === "object") for (const r of ROLES) if (r in p.roleModels) c.roleModels[r] = modelId(p.roleModels[r]);
+  // 0.2 shapes: `model` is the OpenRouter model, `roleModels` are helper models for the current provider.
+  if ("model" in p) c.chat.models.openrouter = modelId(p.model);
+  if (p.roleModels && typeof p.roleModels === "object") {
+    const prov = c.chat.provider || "openrouter";
+    const h = { ...(c.chat.helperModels[prov] || {}) };
+    for (const r of ROLES) if (r in p.roleModels) h[r] = modelId(p.roleModels[r]);
+    c.chat.helperModels[prov] = h;
+  }
+  if ("wizardPending" in p) c.wizardPending = !!p.wizardPending;
   if ("temperature" in p) c.temperature = num(p.temperature, 0, 1.5, c.temperature);
   if ("maxTokens" in p) c.maxTokens = Math.round(num(p.maxTokens, 256, 32768, c.maxTokens));
   if ("tone" in p && ["plain", "friendly", "brief"].includes(p.tone)) c.tone = p.tone;
@@ -130,7 +182,26 @@ export function updateConfig(patch) {
       c.chat.provider = String(q.provider);
     }
     if ("baseUrl" in q) c.chat.baseUrl = chatBaseUrl(q.baseUrl);
-    if (q.models && typeof q.models === "object") for (const [k, v] of Object.entries(q.models)) if (/^[a-z0-9-]{1,32}$/.test(k)) c.chat.models[k] = modelId(v);
+    const pid = (k) => /^[a-z0-9-]{1,32}$/.test(k);
+    if (q.models && typeof q.models === "object") for (const [k, v] of Object.entries(q.models)) if (pid(k)) c.chat.models[k] = modelId(v);
+    if (q.roleModels && typeof q.roleModels === "object") for (const [k, v] of Object.entries(q.roleModels)) {
+      if (!pid(k) || !v || typeof v !== "object") continue;
+      const r = { ...(c.chat.roleModels[k] || {}) };
+      for (const role of ["helpers", "tasks"]) if (role in v) r[role] = modelId(v[role]);
+      c.chat.roleModels[k] = r;
+    }
+    if (q.helperModels && typeof q.helperModels === "object") for (const [k, v] of Object.entries(q.helperModels)) {
+      if (!pid(k) || !v || typeof v !== "object") continue;
+      const h = { ...(c.chat.helperModels[k] || {}) };
+      for (const role of ROLES) if (role in v) h[role] = modelId(v[role]);
+      c.chat.helperModels[k] = h;
+    }
+    if (q.fallback && typeof q.fallback === "object") {
+      const fp = String(q.fallback.provider ?? c.chat.fallback.provider);
+      if (fp && !pid(fp)) throw Object.assign(new Error("Unknown fallback provider."), { status: 400 });
+      c.chat.fallback = { provider: fp, model: fp ? modelId(q.fallback.model ?? c.chat.fallback.model) : "" };
+    }
+    if (q.caps && typeof q.caps === "object") for (const [k, v] of Object.entries(q.caps)) if (pid(k)) c.chat.caps[k] = Math.round(num(v, 0, 100000, 0) * 100) / 100;
   }
   if (p.studio && typeof p.studio === "object") {
     const q = p.studio;
@@ -161,71 +232,103 @@ export function updateConfig(patch) {
       const t = num(q.caps.maxSolPerTrade, 0, 100, c.claudia.caps.maxSolPerTrade);
       const d = num(q.caps.maxSolPerDay, 0, 1000, c.claudia.caps.maxSolPerDay);
       if (t > d) throw Object.assign(new Error("The per-trade cap can't be bigger than the daily cap."), { status: 400 });
-      c.claudia.caps = { maxSolPerTrade: t, maxSolPerDay: d };
+      const et = num(q.caps.maxEthPerTrade, 0, 10, c.claudia.caps.maxEthPerTrade);
+      const ed = num(q.caps.maxEthPerDay, 0, 100, c.claudia.caps.maxEthPerDay);
+      if (et > ed) throw Object.assign(new Error("The per-trade cap can't be bigger than the daily cap."), { status: 400 });
+      c.claudia.caps = { maxSolPerTrade: t, maxSolPerDay: d, maxEthPerTrade: et, maxEthPerDay: ed };
     }
+    if ("chain" in q && ["sol", "hood"].includes(q.chain)) c.claudia.chain = q.chain;
+    if (q.hot && typeof q.hot === "object") for (const k of ["sol", "hood"]) if (k in q.hot) c.claudia.hot[k] = !!q.hot[k];
   }
   return saveConfig(c);
 }
 
-// ── memory ─────────────────────────────────────────────────────────────────
-const MEMORY_TYPES = ["note", "fact", "preference", "conversation", "task"];
-export const listMemories = () => readJsonFile(P.memory, []);
+// ── memory (Markdown files, see memory.js) ──────────────────────────────────
+export const listMemories = () => mem.entries();
 
-export function addMemory(content, type = "note", tags = []) {
-  const text = String(content ?? "").trim().slice(0, 8000);
-  if (!text) throw Object.assign(new Error("A memory needs some text."), { status: 400 });
-  const entry = {
-    id: newId("m_"), content: text, type: MEMORY_TYPES.includes(type) ? type : "note",
-    tags: (Array.isArray(tags) ? tags : []).map(t => String(t).slice(0, 32)).filter(Boolean).slice(0, 8), ts: Date.now(),
-  };
-  const all = [entry, ...listMemories()].slice(0, 2000);
-  writeJsonFile(P.memory, all);
-  return entry;
+/** `opts.source` (untrusted.js) tags where it came from; outside sources wait in quarantine. */
+export function addMemory(content, type = "note", tags = [], opts = {}) {
+  return mem.add(content, type, tags, opts);
 }
 
 export function deleteMemory(id) {
-  const all = listMemories();
-  const next = all.filter(m => m.id !== id);
-  writeJsonFile(P.memory, next);
-  return all.length !== next.length;
+  return mem.remove(id);
 }
 
-/** Simple word-overlap search, newest first on ties. */
+/** Full-text search (SQLite FTS5) or word overlap when SQLite isn't there, best first. */
 export function searchMemories(query, { type = "", limit = 50 } = {}) {
-  const all = listMemories().filter(m => !type || m.type === type);
-  const words = String(query || "").toLowerCase().split(/[^a-z0-9$]+/i).filter(w => w.length > 1);
-  if (!words.length) return all.slice(0, limit);
-  return all
-    .map(m => {
-      const hay = (m.content + " " + m.tags.join(" ")).toLowerCase();
-      const score = words.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
-      return { m, score };
-    })
-    .filter(x => x.score > 0)
-    .sort((a, b) => b.score - a.score || b.m.ts - a.m.ts)
-    .slice(0, limit)
-    .map(x => x.m);
+  return mem.search(query, { type, limit });
 }
 
-// ── chats ──────────────────────────────────────────────────────────────────
-export const listChats = () => readJsonFile(P.chats, []);
-export const getChat = (id) => listChats().find(c => c.id === id) || null;
-
-export function saveChat(id, messages) {
-  const all = listChats();
+// ── chats (SQLite; chats.json when node:sqlite isn't available) ──────────────
+const CHAT_KEEP = 100;
+const chatTitle = (messages) => {
   const firstUser = messages.find(m => m.role === "user");
   const raw = typeof firstUser?.content === "string" ? firstUser.content : Array.isArray(firstUser?.content) ? firstUser.content.find(p => p.type === "text")?.text || "" : "";
-  const title = raw.replace(/\s+/g, " ").trim().slice(0, 60) || "New chat";
-  // Images are not stored on disk; only the text of each message.
-  const stored = messages.slice(-200).map(m => (Array.isArray(m.content) ? { ...m, content: m.content.filter(p => p.type === "text").map(p => p.text).join("\n") } : m));
-  const prev = all.find(c => c.id === id);
-  const entry = { id, title: prev?.title && prev.title !== "New chat" ? prev.title : title, messages: stored, createdAt: prev?.createdAt || Date.now(), updatedAt: Date.now() };
-  writeJsonFile(P.chats, [entry, ...all.filter(c => c.id !== id)].slice(0, 100));
+  return raw.replace(/\s+/g, " ").trim().slice(0, 60) || "New chat";
+};
+// Images and provider-specific blocks are not stored on disk; only the text of each message.
+const storable = (messages) => messages.slice(-200).map(m => {
+  const { raw, ...rest } = m;
+  return Array.isArray(rest.content) ? { ...rest, content: rest.content.filter(p => p.type === "text").map(p => p.text).join("\n") } : rest;
+});
+const rowToChat = (r) => r && { id: r.id, title: r.title, messages: JSON.parse(r.messages), createdAt: r.created_at, updatedAt: r.updated_at };
+
+let chatsMigrated = false;
+function migrateChats() {
+  if (chatsMigrated || !D.db) return;
+  chatsMigrated = true;
+  if (!existsSync(P.chats)) return;
+  let old = [];
+  try { old = JSON.parse(readFileSync(P.chats, "utf-8")); } catch { old = []; }
+  const ins = D.db.prepare("INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, count, messages) VALUES (?, ?, ?, ?, ?, ?)");
+  D.tx(() => { for (const c of Array.isArray(old) ? old : []) if (c?.id) ins.run(String(c.id), String(c.title || "New chat"), Number(c.createdAt) || Date.now(), Number(c.updatedAt) || Date.now(), (c.messages || []).length, JSON.stringify(c.messages || [])); });
+  renameSync(P.chats, P.chats + ".migrated");
+  cache.delete(P.chats);
+}
+
+export function listChats() {
+  migrateChats();
+  if (!D.db) return readJsonFile(P.chats, []);
+  return D.db.prepare("SELECT * FROM chats ORDER BY updated_at DESC LIMIT ?").all(CHAT_KEEP).map(rowToChat);
+}
+
+/** Id, title, dates and message count only (the chat list). */
+export function listChatSummaries() {
+  migrateChats();
+  if (!D.db) return listChats().map(c => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, count: c.messages.length }));
+  return D.db.prepare("SELECT id, title, updated_at, count FROM chats ORDER BY updated_at DESC LIMIT ?").all(CHAT_KEEP).map(r => ({ id: r.id, title: r.title, updatedAt: r.updated_at, count: r.count }));
+}
+
+export function getChat(id) {
+  migrateChats();
+  if (!D.db) return listChats().find(c => c.id === id) || null;
+  return rowToChat(D.db.prepare("SELECT * FROM chats WHERE id = ?").get(String(id))) || null;
+}
+
+export function saveChat(id, messages) {
+  migrateChats();
+  const stored = storable(messages);
+  const title = chatTitle(messages);
+  if (!D.db) {
+    const all = listChats();
+    const prev = all.find(c => c.id === id);
+    const entry = { id, title: prev?.title && prev.title !== "New chat" ? prev.title : title, messages: stored, createdAt: prev?.createdAt || Date.now(), updatedAt: Date.now() };
+    writeJsonFile(P.chats, [entry, ...all.filter(c => c.id !== id)].slice(0, CHAT_KEEP));
+    return entry;
+  }
+  const prev = D.db.prepare("SELECT title, created_at FROM chats WHERE id = ?").get(String(id));
+  const entry = { id, title: prev?.title && prev.title !== "New chat" ? prev.title : title, messages: stored, createdAt: prev?.created_at || Date.now(), updatedAt: Date.now() };
+  D.db.prepare("INSERT INTO chats (id, title, created_at, updated_at, count, messages) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at, count = excluded.count, messages = excluded.messages")
+    .run(String(id), entry.title, entry.createdAt, entry.updatedAt, stored.length, JSON.stringify(stored));
+  D.db.prepare("DELETE FROM chats WHERE id NOT IN (SELECT id FROM chats ORDER BY updated_at DESC LIMIT ?)").run(CHAT_KEEP);
   return entry;
 }
 
 export function deleteChat(id) {
-  writeJsonFile(P.chats, listChats().filter(c => c.id !== id));
+  migrateChats();
+  if (!D.db) return writeJsonFile(P.chats, listChats().filter(c => c.id !== id));
+  D.db.prepare("DELETE FROM chats WHERE id = ?").run(String(id));
 }
 
 // ── usage + activity ───────────────────────────────────────────────────────
@@ -251,9 +354,11 @@ export function trackActivity(type, text) {
 }
 export const listActivity = (limit = 100) => readJsonFile(P.activity, []).slice(0, limit);
 
-/** Removes everything except the vault and the workspace (used by "Clear history"). */
+/** "Clear history": deletes chats, the activity log and usage numbers. Memories, files, skills and keys stay. */
 export function clearHistory() {
-  writeJsonFile(P.chats, []);
+  migrateChats();
+  if (D.db) D.db.exec("DELETE FROM chats");
+  else writeJsonFile(P.chats, []);
   writeJsonFile(P.activity, []);
   writeJsonFile(P.usage, { days: {} });
 }
