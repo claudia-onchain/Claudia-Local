@@ -11,12 +11,17 @@
  *              loopback are refused (DNS rebinding)
  *   versions   2026-07-28, 2025-06-18, 2025-03-26 (answers with the client's version when it knows it)
  *
+ *   sessions   every request after initialize must carry the Mcp-Session-Id it handed out
+ *   switches   a tool switched off on the Tools page is hidden from tools/list and refused on call
+ *   locked     the server only listens while the app is unlocked; locking stops it, unlocking starts it again
+ *
  * The JSON-RPC is small enough to write by hand, so there's no dependency. To expose another tool, add
  * it to studio-tools.js; it shows up here and in the chat agent.
  */
 import { createServer } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getConfig, updateConfig, saveConfig } from "./store.js";
+import * as vault from "./vault.js";
 import { STUDIO_TOOLS, runStudioTool, toolError } from "./studio-tools.js";
 
 const VERSIONS = ["2026-07-28", "2025-06-18", "2025-03-26"];
@@ -28,6 +33,9 @@ let running = { port: 0, error: "" };
 let log = () => {};
 let version = "0.0.0";
 const sessions = new Set();
+const MAX_SESSIONS = 100;
+/** Tools switched on (Tools page). Studio tools are on unless you switched them off. */
+const toolOn = (name) => getConfig().tools?.[name] !== false;
 
 export function init(opts) { log = opts.log || log; version = opts.version || version; }
 
@@ -43,7 +51,7 @@ export function newToken() {
 
 export function info() {
   const m = getConfig().studio.mcp;
-  return { enabled: m.enabled, port: m.port, running: !!running.port, error: running.error, url: `http://${HOST}:${m.port}/mcp`, tokenSet: !!m.tokenHash, tokenHint: m.tokenHint, tools: STUDIO_TOOLS.map((t) => t.name) };
+  return { enabled: m.enabled, port: m.port, running: !!running.port, locked: !vault.isUnlocked(), error: running.error, url: `http://${HOST}:${m.port}/mcp`, tokenSet: !!m.tokenHash, tokenHint: m.tokenHint, tools: STUDIO_TOOLS.filter((t) => toolOn(t.name)).map((t) => t.name) };
 }
 
 export async function configure(patch) {
@@ -52,11 +60,12 @@ export async function configure(patch) {
   return info();
 }
 
-/** Start or stop to match the settings. */
+/** Start or stop to match the settings and the lock: it only listens while the app is unlocked. */
 export async function apply() {
   const m = getConfig().studio.mcp;
-  if (server && (!m.enabled || running.port !== m.port)) await stop();
-  if (m.enabled && !server) await start(m.port);
+  const want = m.enabled && vault.isUnlocked();
+  if (server && (!want || running.port !== m.port)) await stop();
+  if (want && !server) await start(m.port);
 }
 
 function stop() {
@@ -120,12 +129,23 @@ async function handle(req, res, port) {
   if (path !== "/mcp") return send(res, 404, { error: "Not found. The MCP endpoint is /mcp" });
   if (!authorized(req)) return send(res, 401, { jsonrpc: "2.0", id: null, error: { code: -32001, message: "Missing or wrong token. Make a new one in Claudia Local → Settings → Local MCP." } }, { "WWW-Authenticate": 'Bearer realm="claudia-local"' });
   if (req.method === "GET") return send(res, 405, { error: "This server doesn't offer a stream; POST JSON-RPC to /mcp." }, { Allow: "POST, DELETE" });
-  if (req.method === "DELETE") { sessions.delete(String(req.headers["mcp-session-id"] || "")); return send(res, 200, {}); }
+  const sid = String(req.headers["mcp-session-id"] || "");
+  if (req.method === "DELETE") {
+    if (!sessions.has(sid)) return send(res, 404, { jsonrpc: "2.0", id: null, error: { code: -32001, message: "Session not found" } });
+    sessions.delete(sid);
+    return send(res, 200, {});
+  }
   if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" }, { Allow: "POST, DELETE" });
 
   let msg;
   try { msg = JSON.parse(await readBody(req)); } catch (e) { return send(res, e.status || 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }); }
   const batch = Array.isArray(msg);
+  // Only initialize may come without a session; everything else needs the id initialize handed out.
+  const initializing = (batch ? msg : [msg]).some((x) => x?.method === "initialize");
+  if (!initializing) {
+    if (!sid) return send(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32000, message: "Missing Mcp-Session-Id header. Send initialize first." } });
+    if (!sessions.has(sid)) return send(res, 404, { jsonrpc: "2.0", id: null, error: { code: -32001, message: "Session not found. Send initialize again." } });
+  }
   const out = [];
   const headers = {};
   for (const m of batch ? msg : [msg]) {
@@ -146,6 +166,7 @@ async function dispatch(m, headers) {
       const want = m.params?.protocolVersion;
       const sid = randomBytes(16).toString("hex");
       sessions.add(sid);
+      while (sessions.size > MAX_SESSIONS) sessions.delete(sessions.values().next().value);
       headers["Mcp-Session-Id"] = sid;
       return ok({
         protocolVersion: VERSIONS.includes(want) ? want : VERSIONS[0],
@@ -156,10 +177,11 @@ async function dispatch(m, headers) {
     }
     case "ping": return ok({});
     case "tools/list":
-      return ok({ tools: STUDIO_TOOLS.map((t) => ({ name: t.name, title: t.title, description: t.description, inputSchema: t.input, annotations: { title: t.title, ...t.annotations } })) });
+      return ok({ tools: STUDIO_TOOLS.filter((t) => toolOn(t.name)).map((t) => ({ name: t.name, title: t.title, description: t.description, inputSchema: t.input, annotations: { title: t.title, ...t.annotations } })) });
     case "tools/call": {
       const name = String(m.params?.name || "");
       if (!STUDIO_TOOLS.some((t) => t.name === name)) return fail(-32602, `Unknown tool: ${name}`);
+      if (!toolOn(name)) return ok({ content: [{ type: "text", text: `${name} is switched off in Claudia Local → Tools.` }], isError: true });
       try {
         const r = await runStudioTool(name, m.params?.arguments && typeof m.params.arguments === "object" ? m.params.arguments : {}, { source: "mcp" });
         return ok({ content: [{ type: "text", text: r.text }], ...(r.data && typeof r.data === "object" && !Array.isArray(r.data) ? { structuredContent: JSON.parse(JSON.stringify(r.data)) } : {}), isError: !!r.isError });

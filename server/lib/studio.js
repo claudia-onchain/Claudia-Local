@@ -2,7 +2,8 @@
  * studio.js — the creator studio's glue: what Claudia Local adds on top of @useclaudia/media and
  * @useclaudia/social, shared by the dashboard routes, the chat agent and the local MCP server.
  *
- *   brand kit        Claudia's portraits, voice, tone guide and banned phrases (brand.json)
+ *   brand kit        your brand: name, tone guide, topics, banned phrases, visuals (portraits, look,
+ *                    voice), in brand.json. "Claudia" is a preset you can load.
  *   media requests   media the agent, MCP or a campaign asked for; nothing is generated (or paid
  *                    for) until you approve it in Socials → Approvals (media-requests.json)
  *   posts            drafting, previews with your banned phrases and caps, approve, publish
@@ -15,6 +16,7 @@
  */
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { P, ensurePrivateDir } from "./paths.js";
 import { getConfig, updateConfig, readJsonFile, writeJsonFile, newId, trackActivity } from "./store.js";
 import * as wsp from "./workspace.js";
@@ -47,11 +49,35 @@ export async function warm() {
   await S.social().catch(() => {});
 }
 
+/**
+ * Scheduled posts. Due posts go through publishPost one at a time, so they get the same checks as
+ * approving and publishing by hand: the kill switch, your banned phrases and your daily caps. A post
+ * that fails a check is held back in Approvals with the reason. The package's own tick then handles
+ * the rest (late posts go back to Approvals, connection expiry warnings).
+ */
+const LATE_MS = 10 * 60_000;
+let ticking = false;
 async function tick() {
-  if (!vault.isUnlocked() || kill().posting) return;
+  if (ticking || !vault.isUnlocked() || kill().posting) return;
   const s = S.loaded();
   if (!s?.tick) return;
-  try { await s.tick(); } catch (e) { log(`[social] tick: ${e.message}`); }
+  ticking = true;
+  try {
+    const now = Date.now();
+    const due = s.posts({ status: "scheduled", limit: 5000 }).filter((p) => (p.input.scheduleAt || 0) <= now && now - (p.input.scheduleAt || 0) <= LATE_MS).sort((a, b) => a.input.scheduleAt - b.input.scheduleAt);
+    for (const p of due) {
+      if (kill().posting) break;
+      try { await publishPost(p.id); }
+      catch (e) {
+        if (e.code !== "blocked") { log(`[social] scheduled ${p.id}: ${e.message}`); continue; }
+        try { s.update(p.id, {}); } catch { /* already moved on */ } // back to Approvals: needs a fresh yes
+        logAction("schedule_held", `Held scheduled post ${p.id}: ${clip(e.message, 300)}`, { postId: p.id });
+        emit("post", findPost(s, p.id));
+      }
+    }
+    await s.tick();
+  } catch (e) { log(`[social] tick: ${e.message}`); }
+  finally { ticking = false; }
 }
 
 export async function status() {
@@ -141,19 +167,55 @@ export function saveUpload(buf, mime, { brand = false } = {}) {
 }
 
 // ── brand kit ──────────────────────────────────────────────────────────────
-export const BRAND_ID = "claudia";
-const DEFAULT_BRAND = { id: BRAND_ID, name: "Claudia", refs: [], voice: { provider: "", voiceId: "" }, style: "", banned: [], useInChat: true, useInSocial: true };
+// Your brand, not Claudia's. A brand.json from 0.2 (id "claudia") keeps its id and every value; it only
+// gains the new fields (topics, visuals). New installs start empty with the id "my-brand".
+export const BRAND_ID = "my-brand";
+const DEFAULT_BRAND = { id: BRAND_ID, name: "", refs: [], voice: { provider: "", voiceId: "" }, style: "", topics: [], visuals: "", banned: [], useInChat: true, useInSocial: true, preset: "" };
 export const VOICE_PROVIDERS = ["elevenlabs", "openai", "google"];
+
+/** Presets you can load into the brand kit. Claudia's values are what 0.2 shipped as her brand. */
+export const BRAND_PRESETS = {
+  claudia: {
+    name: "Claudia",
+    style: "Warm, playful, short sentences. Says gm. Explains things simply.\nNever hypes prices. Calls people friends, not degens.\nSolana first. Plain words over jargon.",
+    topics: ["$CLAUDIA", "coins launched on Claudia", "Solana", "AI agents"],
+    banned: ["to the moon", "guaranteed", "100x", "can't lose"],
+    visuals: "Claudia: a 28-year-old woman (an adult in her late twenties) with a glossy black jaw-length bob, heavy straight bangs and one peach-orange streak through the front bangs, a small peach star-shaped hair clip, a thin headset microphone along her cheek, light freckles, grey-green eyes and glossy coral lips; a cool, direct gaze; futurist glossy wardrobe (white puffed-sleeve vinyl, liquid silver, patent, orange visors); photoreal, editorial flash, rose accent.",
+    portrait: "avatar-256.webp",
+  },
+};
 
 export function getBrand() {
   const b = readJsonFile(P.brand, {});
-  return { ...DEFAULT_BRAND, ...b, voice: { ...DEFAULT_BRAND.voice, ...(b.voice || {}) }, refs: (b.refs || []).filter((r) => existsSync(r)) };
+  return { ...DEFAULT_BRAND, ...b, voice: { ...DEFAULT_BRAND.voice, ...(b.voice || {}) }, topics: Array.isArray(b.topics) ? b.topics : [], refs: (b.refs || []).filter((r) => existsSync(r)) };
+}
+
+/** Load a preset into the brand kit (replaces name, tone guide, topics, banned phrases and look; adds her portrait). */
+export async function loadBrandPreset(id) {
+  const p = BRAND_PRESETS[id];
+  if (!p) throw err(404, "Unknown preset.");
+  const cur = getBrand();
+  const refs = [...cur.refs];
+  const here = (rel) => fileURLToPath(new URL(rel, import.meta.url));
+  const src = [here(`../../dashboard/dist/claudia/${p.portrait}`), here(`../../dashboard/public/claudia/${p.portrait}`)].find((f) => existsSync(f));
+  if (src && refs.length < 8 && cur.preset !== id) {
+    try { refs.push(saveUpload(readFileSync(src), "image/webp", { brand: true }).path); } catch (e) { log(`[brand] portrait: ${e.message}`); }
+  }
+  const b = await saveBrand({ name: p.name, style: p.style, topics: p.topics, banned: p.banned, visuals: p.visuals, refs, preset: id });
+  logAction("brand", `Loaded the ${p.name} preset into the brand kit`);
+  return b;
 }
 
 export async function saveBrand(patch = {}) {
   const b = getBrand();
-  if ("name" in patch) b.name = String(patch.name || "Claudia").trim().slice(0, 60) || "Claudia";
+  if ("name" in patch) b.name = String(patch.name || "").trim().slice(0, 60);
   if ("style" in patch) b.style = String(patch.style || "").slice(0, 4000);
+  if ("visuals" in patch) b.visuals = String(patch.visuals || "").slice(0, 2000);
+  if ("preset" in patch) b.preset = BRAND_PRESETS[patch.preset] ? String(patch.preset) : "";
+  if ("topics" in patch) {
+    const list = Array.isArray(patch.topics) ? patch.topics : String(patch.topics || "").split(/[\n,]/);
+    b.topics = [...new Set(list.map((x) => String(x).trim().slice(0, 60)).filter(Boolean))].slice(0, 20);
+  }
   if ("banned" in patch) {
     const list = Array.isArray(patch.banned) ? patch.banned : String(patch.banned || "").split("\n");
     b.banned = [...new Set(list.map((x) => String(x).trim().slice(0, 80)).filter(Boolean))].slice(0, 100);
@@ -174,12 +236,17 @@ export async function saveBrand(patch = {}) {
   return b;
 }
 
-/** The media package keeps its own copy (used when a request says brand: "claudia"). */
+/**
+ * The media package keeps its own copy (used when a request asks for the brand kit). Its `style` is
+ * appended to image and video prompts, so it gets the look (visuals). A 0.2 kit without visuals keeps
+ * sending its tone guide, as it did before.
+ */
 async function syncBrand() {
   const m = await M.media().catch(() => null);
   if (!m?.brands?.save) return;
   const b = getBrand();
-  m.brands.save({ id: b.id, name: b.name, refs: b.refs, voice: b.voice.provider ? b.voice : undefined, style: b.style || undefined, banned: b.banned });
+  const look = "visuals" in readJsonFile(P.brand, {}) ? b.visuals : b.style;
+  m.brands.save({ id: b.id, name: b.name || "My brand", refs: b.refs, voice: b.voice.provider ? b.voice : undefined, style: look || undefined, banned: b.banned });
 }
 
 /** Banned phrases found in a text (case-insensitive). */
@@ -191,8 +258,13 @@ export function bannedIn(text) {
 /** A few lines for the chat agent's system prompt (empty when switched off). */
 export function brandForChat() {
   const b = getBrand();
-  if (!b.useInChat || (!b.style && !b.banned.length)) return "";
-  return [b.style ? `Tone guide for anything written as ${b.name}:\n${clip(b.style, 2000)}` : "", b.banned.length ? `Never use these phrases: ${b.banned.map((x) => `"${x}"`).join(", ")}.` : ""].filter(Boolean).join("\n");
+  if (!b.useInChat || (!b.style && !b.banned.length && !b.topics.length)) return "";
+  const who = b.name || "the user's brand";
+  return [
+    b.style ? `Tone guide for anything written as ${who}:\n${clip(b.style, 2000)}` : "",
+    b.topics.length ? `Topics ${who} covers: ${b.topics.join(", ")}.` : "",
+    b.banned.length ? `Never use these phrases: ${b.banned.map((x) => `"${x}"`).join(", ")}.` : "",
+  ].filter(Boolean).join("\n");
 }
 
 // ── media ──────────────────────────────────────────────────────────────────
@@ -216,7 +288,7 @@ export function normalizeRequest(x = {}) {
   if (x.seed !== undefined && x.seed !== null && x.seed !== "") r.seed = Math.round(Number(x.seed)) || 0;
   if (Array.isArray(x.refs) && x.refs.length) r.refs = x.refs.slice(0, 8).map((ref) => (/^https:\/\//i.test(String(ref)) ? String(ref).slice(0, 2000) : safeMediaPath(ref)));
   if (x.brand) {
-    r.brand = BRAND_ID;
+    r.brand = getBrand().id;
     const b = getBrand();
     if ((kind === "speech" || kind === "avatar") && !r.voice && b.voice.voiceId) r.voice = b.voice.voiceId;
   }

@@ -9,23 +9,34 @@ import Helpers from "./pages/Helpers";
 import Memory from "./pages/Memory";
 import Files from "./pages/Files";
 import Skills from "./pages/Skills";
+import Tools from "./pages/Tools";
+import Health from "./pages/Health";
+import Wizard from "./pages/wizard/Wizard";
 import Activity from "./pages/Activity";
 import Claudia from "./pages/Claudia";
 import Settings from "./pages/Settings";
 import Generate from "./pages/Generate";
 import Socials from "./pages/Socials";
 import { useStudioEvents } from "./studio";
+import Tasks from "./pages/auto/Tasks";
+import Approvals from "./pages/auto/Approvals";
+import BrandKit from "./pages/BrandKit";
+import { useAutoEvents } from "./pages/auto/auto";
 
-export type AppState = { name: string; version: string; setup: boolean; unlocked: boolean; dataDir: string };
+export type AppState = { name: string; version: string; setup: boolean; unlocked: boolean; wizard?: boolean; dataDir: string };
 
 const NAV: { to: string; label: string; group?: string }[] = [
   { to: "/chat", label: "Chat", group: "Agent" },
+  { to: "/tasks", label: "Tasks" },
+  { to: "/approvals", label: "Approvals" },
   { to: "/helpers", label: "Helpers" },
   { to: "/memory", label: "Memory" },
   { to: "/files", label: "Files" },
   { to: "/skills", label: "Skills" },
+  { to: "/tools", label: "Tools" },
   { to: "/generate", label: "Generate", group: "Studio" },
   { to: "/socials", label: "Socials" },
+  { to: "/brand", label: "Brand kit" },
   { to: "/claudia", label: "Overview", group: "Claudia" },
   { to: "/claudia/coins", label: "Coins" },
   { to: "/claudia/thread", label: "Thread" },
@@ -33,6 +44,7 @@ const NAV: { to: string; label: string; group?: string }[] = [
   { to: "/claudia/agent", label: "Your agent" },
   { to: "/activity", label: "Activity", group: "You" },
   { to: "/settings", label: "Settings" },
+  { to: "/health", label: "Health" },
 ];
 
 export default function App() {
@@ -50,6 +62,7 @@ export default function App() {
   if (err) return <div className="gate"><div className="gate-box"><p className="error">Can't reach Claudia Local: {err}</p><button className="btn mt-12" onClick={load}>Try again</button></div></div>;
   if (!st) return null;
   if (!st.unlocked) return <Gate state={st} onDone={load} />;
+  if (st.wizard) return <Wizard state={st} onDone={load} resume />;
   return <Shell state={st} />;
 }
 
@@ -59,6 +72,7 @@ function Shell({ state }: { state: AppState }) {
   const [claudia, setClaudia] = useState<any>(null);
   const a = useAgent();
   const waiting = useWaiting();
+  const asks = usePendingApprovals();
   useEffect(() => { setMenu(false); }, [loc.pathname]);
   const loadClaudia = useCallback(() => { api("/api/claudia/status").then(setClaudia).catch(() => {}); }, []);
   useEffect(() => {
@@ -80,6 +94,7 @@ function Shell({ state }: { state: AppState }) {
             {n.label}
             {n.to === "/chat" && a.pendingApprovals > 0 && <span className="count" title="Waiting for your answer">{a.pendingApprovals}</span>}
             {n.to === "/socials" && waiting > 0 && <span className="count" title="Waiting for your approval">{waiting}</span>}
+            {n.to === "/approvals" && asks > 0 && <span className="count" title="Waiting for your answer">{asks}</span>}
           </NavLink>
         </div>
       ))}
@@ -128,7 +143,12 @@ function Shell({ state }: { state: AppState }) {
           <Route path="/helpers" element={<Page><Helpers /></Page>} />
           <Route path="/memory" element={<Page><Memory /></Page>} />
           <Route path="/files" element={<Page><Files /></Page>} />
-          <Route path="/skills" element={<Page narrow><Skills /></Page>} />
+          <Route path="/skills" element={<Page><Skills /></Page>} />
+          <Route path="/tools" element={<Page narrow><Tools /></Page>} />
+          <Route path="/health" element={<Page narrow><Health /></Page>} />
+          <Route path="/tasks/*" element={<Page><Tasks /></Page>} />
+          <Route path="/approvals" element={<Page narrow><Approvals /></Page>} />
+          <Route path="/brand" element={<Page><BrandKit standalone /></Page>} />
           <Route path="/activity" element={<Page><Activity /></Page>} />
           <Route path="/generate/*" element={<Page><Generate /></Page>} />
           <Route path="/socials/*" element={<Page><Socials /></Page>} />
@@ -145,6 +165,15 @@ function Shell({ state }: { state: AppState }) {
       </div>
     </div>
   );
+}
+
+/** Items in the approval queue (approvals.js) waiting for an answer (sidebar count). */
+function usePendingApprovals() {
+  const [n, setN] = useState(0);
+  const load = useCallback(() => { api<{ pending: number }>("/api/approvals?status=pending").then(r => setN(r.pending)).catch(() => {}); }, []);
+  useEffect(() => { load(); }, [load]);
+  useAutoEvents(e => { if (e.topic === "approval") load(); });
+  return n;
 }
 
 /** Posts and media waiting for approval (sidebar count). Quietly 0 when the studio packages aren't installed. */

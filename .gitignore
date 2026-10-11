@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dashboard/dist/
+build/
+*.tsbuildinfo
+.vite/
+
+# Your local data lives in ~/.claudia-local, never in this folder; just in case:
+.claudia-local/
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+npm-debug.log*
+
+# Throwaway data folders for development
+.dev-home/
+*.tgz

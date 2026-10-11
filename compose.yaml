@@ -1,0 +1,19 @@
+# docker compose up -d   then open http://127.0.0.1:3939
+# The port is published on this computer's loopback only. Don't change it to "3939:3939" or 0.0.0.0:
+# that would put your agent on your network. Keep the host port 3939 (the app checks the Host header).
+services:
+  claudia-local:
+    build: .
+    image: claudia-local:0.3.0
+    container_name: claudia-local
+    ports:
+      - "127.0.0.1:3939:3939"
+    volumes:
+      - claudia-local-data:/data
+    # Lets the app reach Ollama / LM Studio on this computer at http://host.docker.internal:11434/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  claudia-local-data:

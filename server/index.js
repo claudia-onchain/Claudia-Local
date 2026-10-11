@@ -3,7 +3,9 @@
  * Claudia Local — server.
  *
  * One Node process on 127.0.0.1 serves the dashboard, a JSON API and the agent WebSocket.
- * Nothing listens on other interfaces. Secrets stay in the encrypted vault; the app is locked until
+ * Nothing listens on other interfaces. The one exception is the Docker image: there CLAUDIA_LOCAL_DOCKER=1 is
+ * set, which lets CLAUDIA_LOCAL_HOST pick the address inside the container (compose.yaml publishes it on the
+ * host's 127.0.0.1 only). Without CLAUDIA_LOCAL_DOCKER=1, CLAUDIA_LOCAL_HOST is ignored. Secrets stay in the encrypted vault; the app is locked until
  * you enter your passphrase, and unlocking sets a same-site, HttpOnly session cookie that every API
  * call and the WebSocket need.
  */
@@ -13,26 +15,33 @@ import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 
-import { P, ensureHome, HOME } from "./lib/paths.js";
+import { P, ensureHome, HOME, tilde } from "./lib/paths.js";
 import { json, readJson, HttpError, createGuards, securityHeaders, createRateLimiter } from "./lib/http.js";
 import * as vault from "./lib/vault.js";
 import * as store from "./lib/store.js";
 import * as wsp from "./lib/workspace.js";
 import * as cl from "./lib/claudia.js";
-import { listModels, modelLabel, DEFAULT_MODEL } from "./lib/model.js";
+import { modelLabel, resolveModel, canSeeImages } from "./lib/model.js";
 import { createAgent, toolList, HELPERS, TOOLS } from "./agent.js";
 import * as studio from "./lib/studio.js";
 import * as mcp from "./lib/mcp.js";
 import * as M from "./lib/studio-media.js";
 import * as S from "./lib/studio-social.js";
 import { handleStudio, oauthCallback, explainPackageError } from "./lib/routes-studio.js";
-import { CHAT_BY_ID, listChatModels } from "./lib/providers.js";
+import { chainRoutes, oauthClaudia, filesUpload } from "./lib/routes-chains.js";
+import { CHAT_BY_ID } from "./lib/providers.js";
+import * as mcpc from "./lib/mcp-client.js";
+import { createCoreRoutes } from "./lib/routes-core.js";
+import * as skills from "./lib/skills.js";
+import * as auto from "./lib/auto.js";
+import { handleAuto } from "./lib/routes-auto.js";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).version;
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(__dirname, "..", "dashboard", "dist");
 const PORT = Number(process.env.CLAUDIA_LOCAL_PORT || process.env.PORT || 3939);
-const HOST = "127.0.0.1"; // never anything else
+const DOCKER = process.env.CLAUDIA_LOCAL_DOCKER === "1";
+const HOST = (DOCKER && process.env.CLAUDIA_LOCAL_HOST?.trim()) || "127.0.0.1"; // never anything else outside Docker
 
 ensureHome();
 const guards = createGuards(PORT);
@@ -51,13 +60,20 @@ const agent = createAgent({ log });
 const broadcast = (m) => { const s = JSON.stringify(m); for (const c of wss.clients) if (c.readyState === 1) { try { c.send(s); } catch { /* */ } } };
 studio.init({ broadcast, log, port: PORT });
 mcp.init({ log, version: VERSION });
+mcpc.init({ log, version: VERSION });
+const handleCore = createCoreRoutes({ version: VERSION, boundHost: () => server.address()?.address || "", onConfigChange: () => mcp.apply() });
+// Tasks, heartbeat, watchers, the approval queue and Telegram (auto.js).
+auto.init({ agent, tools: TOOLS, broadcast, log });
 
 // ── auto-lock ──────────────────────────────────────────────────────────────
 let lastActive = Date.now();
 function lockNow(reason) {
   vault.lock();
   agent.reset();
+  auto.onLock();
   guards.endAllSessions();
+  mcp.apply().catch(() => {});     // the local MCP server only listens while unlocked
+  mcpc.closeAll().catch(() => {}); // and the agent's MCP connections close
   for (const c of wss.clients) { try { c.close(4401, "Locked"); } catch { /* */ } }
   log(`Locked (${reason})`);
 }
@@ -68,7 +84,16 @@ setInterval(() => {
 
 // ── public (no session) routes ─────────────────────────────────────────────
 function state(req) {
-  return { name: "Claudia Local", version: VERSION, setup: vault.exists(), unlocked: vault.isUnlocked() && guards.hasSession(req), dataDir: HOME.replace(process.env.HOME || "\u0000", "~") };
+  const unlocked = vault.isUnlocked() && guards.hasSession(req);
+  return { name: "Claudia Local", version: VERSION, setup: vault.exists(), unlocked, wizard: unlocked && store.getConfig().wizardPending, dataDir: tilde(HOME) };
+}
+
+/** After setup or unlock: start what only runs while unlocked. */
+function afterUnlock() {
+  studio.warm().catch(() => {});
+  mcp.apply().catch((e) => log(`[mcp] ${e.message}`));
+  mcpc.warm().catch(() => {});
+  skills.installPending(log).catch(() => {}); // skills a template asked for earlier
 }
 
 async function startSession(res) {
@@ -88,12 +113,12 @@ async function publicRoutes(req, res, url) {
     if (key && !/^sk-or-[A-Za-z0-9_-]{10,200}$/.test(key) && !process.env.CLAUDIA_LOCAL_OPENROUTER_BASE) throw new HttpError(400, "That doesn't look like an OpenRouter key (it starts with sk-or-).");
     await vault.create(d.passphrase, { openrouterKey: key || undefined });
     store.saveConfig(store.getConfig());
-    if (d.model !== undefined) store.updateConfig({ model: d.model });
+    store.updateConfig({ wizardPending: true, ...(key ? { chat: { provider: "openrouter" } } : {}), ...(d.model ? { model: d.model } : {}) });
     store.trackActivity("app", "Claudia Local set up");
     await startSession(res);
     log("Vault created");
-    studio.warm().catch(() => {});
-    return json(res, 200, { ok: true, ...state(req), unlocked: true }), true;
+    afterUnlock();
+    return json(res, 200, { ok: true, ...state(req), unlocked: true, wizard: true }), true;
   }
   if (url === "/api/unlock" && m === "POST") {
     const rl = limit("unlock", 8, 60_000);
@@ -104,8 +129,8 @@ async function publicRoutes(req, res, url) {
     await startSession(res);
     lastActive = Date.now();
     log("Unlocked");
-    studio.warm().catch(() => {});
-    return json(res, 200, { ok: true, ...state(req), unlocked: true }), true;
+    afterUnlock();
+    return json(res, 200, { ok: true, ...state(req), unlocked: true, wizard: store.getConfig().wizardPending }), true;
   }
   return false;
 }
@@ -115,13 +140,13 @@ const qs = (req) => new URL(req.url, "http://x").searchParams;
 
 function publicConfig() {
   const c = store.getConfig();
-  const preset = CHAT_BY_ID.get(c.chat.provider) || CHAT_BY_ID.get("openrouter");
-  const chatModel = preset.id === "openrouter" ? c.model : c.chat.models[preset.id] || "";
+  const preset = CHAT_BY_ID.get(c.chat.provider);
+  const main = preset ? resolveModel(c) : "";
   return {
-    model: c.model, modelLabel: preset.id === "openrouter" ? modelLabel(c.model || DEFAULT_MODEL) : chatModel || "No model picked yet", usingDefaultModel: preset.id === "openrouter" && !c.model, roleModels: c.roleModels,
-    chat: { provider: preset.id, providerName: preset.name, baseUrl: c.chat.baseUrl, models: c.chat.models },
+    modelLabel: main ? `${modelLabel(main)} · ${preset.name}` : preset ? "No model picked yet" : "No chat model yet", vision: canSeeImages(c),
+    chat: { provider: preset?.id || "", providerName: preset?.name || "", baseUrl: c.chat.baseUrl, models: c.chat.models, roleModels: c.chat.roleModels, helperModels: c.chat.helperModels, fallback: c.chat.fallback, caps: c.chat.caps },
     temperature: c.temperature, maxTokens: c.maxTokens, tone: c.tone, askBeforePost: c.askBeforePost, autoLockMinutes: c.autoLockMinutes,
-    showImages: c.showImages, openrouterKey: vault.mask("openrouterKey"), dataDir: HOME, workspaceDir: wsp.root(),
+    showImages: c.showImages, openrouterKey: vault.mask("openrouterKey"), dataDir: HOME, workspaceDir: wsp.root(), wizardPending: c.wizardPending,
   };
 }
 
@@ -129,6 +154,7 @@ async function claudiaRoutes(req, res, url) {
   const m = req.method;
   const sub = url.slice("/api/claudia".length);
   const body = () => readJson(req, 64 * 1024);
+  if (await chainRoutes(req, res, url, { port: PORT })) return;
   if (sub === "/status" && m === "GET") return json(res, 200, cl.status());
   if (sub === "/connect" && m === "POST") return json(res, 200, await cl.connect(await body()));
   if (sub === "/generate-keys" && m === "POST") { const d = await body(); return json(res, 200, cl.generateKeys({ device: !!d.device, wallet: !!d.wallet, force: !!d.force })); }
@@ -146,7 +172,7 @@ async function claudiaRoutes(req, res, url) {
   }
   if (sub === "/platform" && m === "GET") return json(res, 200, await cl.publicClient().platform());
   if (sub === "/overview" && m === "GET") return json(res, 200, await cl.overview());
-  if (sub === "/coins" && m === "GET") return json(res, 200, { coins: await cl.coins(qs(req).get("q") || "") });
+  if (sub === "/coins" && m === "GET") return json(res, 200, { coins: await cl.coins(qs(req).get("q") || "", qs(req).get("chain") === "hood" ? "hood" : "sol") });
   if (sub.startsWith("/coin/") && m === "GET") return json(res, 200, await cl.coin(decodeURIComponent(sub.slice(6))));
   if (sub === "/rooms" && m === "GET") return json(res, 200, { rooms: await cl.rooms() });
   if (sub.startsWith("/thread/") && m === "GET") {
@@ -173,7 +199,9 @@ async function claudiaRoutes(req, res, url) {
 async function privateRoutes(req, res, url) {
   const m = req.method;
   if (url.startsWith("/api/claudia/")) return claudiaRoutes(req, res, url);
+  if (await handleCore(req, res, url)) return;
   if (await handleStudio(req, res, url)) return;
+  if (await handleAuto(req, res, url, { port: PORT })) return;
 
   if (url === "/api/lock" && m === "POST") { lockNow("you locked it"); res.setHeader("Set-Cookie", guards.sessionCookie("", 0)); return json(res, 200, { ok: true }); }
   if (url === "/api/passphrase" && m === "POST") {
@@ -185,7 +213,12 @@ async function privateRoutes(req, res, url) {
   }
 
   if (url === "/api/config" && m === "GET") return json(res, 200, publicConfig());
-  if (url === "/api/config" && m === "POST") { store.updateConfig(await readJson(req, 64 * 1024)); return json(res, 200, publicConfig()); }
+  if (url === "/api/config" && m === "POST") {
+    const d = await readJson(req, 64 * 1024);
+    store.updateConfig(d);
+    if (d.studio?.mcp) await mcp.apply();
+    return json(res, 200, publicConfig());
+  }
   if (url === "/api/secrets/openrouter" && m === "POST") {
     const k = String((await readJson(req, 8 * 1024)).key || "").trim();
     if (k && !/^sk-or-[A-Za-z0-9_-]{10,200}$/.test(k) && !process.env.CLAUDIA_LOCAL_OPENROUTER_BASE) throw new HttpError(400, "That doesn't look like an OpenRouter key (it starts with sk-or-).");
@@ -193,14 +226,6 @@ async function privateRoutes(req, res, url) {
     store.trackActivity("settings", k ? "OpenRouter key saved" : "OpenRouter key removed");
     return json(res, 200, publicConfig());
   }
-  if (url === "/api/models" && m === "GET") {
-    const prov = qs(req).get("provider");
-    if (prov && prov !== "openrouter") {
-      try { return json(res, 200, { models: (await listChatModels(prov)).map(x => ({ id: x.id, name: x.name, context: null, noCost: false, promptPerM: null, completionPerM: null, tools: null })) }); } catch (e) { return json(res, 200, { models: [], error: "Couldn't load the model list: " + e.message }); }
-    }
-    try { return json(res, 200, { models: await listModels() }); } catch (e) { return json(res, 200, { models: [], error: "Couldn't load the model list: " + e.message }); }
-  }
-
   if (url === "/api/tools" && m === "GET") return json(res, 200, { tools: toolList(), askBeforePost: store.getConfig().askBeforePost });
   if (url === "/api/tools" && m === "POST") {
     const d = await readJson(req, 16 * 1024);
@@ -211,13 +236,13 @@ async function privateRoutes(req, res, url) {
   }
   if (url === "/api/helpers" && m === "GET") {
     const c = store.getConfig();
-    return json(res, 200, { helpers: Object.entries(HELPERS).map(([role, h]) => ({ role, label: h.label, about: h.about, tools: h.tools, model: c.roleModels[role] || "", modelLabel: c.roleModels[role] ? modelLabel(c.roleModels[role]) : "Same as chat" })) });
+    const own = c.chat.helperModels[c.chat.provider] || {};
+    return json(res, 200, { helpers: Object.entries(HELPERS).map(([role, h]) => ({ role, label: h.label, about: h.about, tools: h.tools, model: own[role] || "", modelLabel: modelLabel(resolveModel(c, { role })) })) });
   }
 
-  if (url === "/api/memory" && m === "GET") { const q = qs(req); return json(res, 200, { memories: store.searchMemories(q.get("q") || "", { type: q.get("type") || "", limit: 200 }), total: store.listMemories().length }); }
-  if (url === "/api/memory" && m === "POST") { const d = await readJson(req, 64 * 1024); return json(res, 200, { entry: store.addMemory(d.content, d.type, d.tags) }); }
-  if (url.startsWith("/api/memory/") && m === "DELETE") return json(res, 200, { ok: store.deleteMemory(decodeURIComponent(url.slice(12))) });
+  // Memory, skills, MCP servers, wizard and health: routes-core.js.
 
+  if (url === "/api/files/upload" && m === "POST") return filesUpload(req, res);
   if (url === "/api/files") {
     const q = qs(req);
     const path = q.get("path") || "/";
@@ -238,7 +263,7 @@ async function privateRoutes(req, res, url) {
     if (m === "DELETE") { const r = wsp.remove(path); store.trackActivity("files", `Deleted ${r.path}`); return json(res, 200, r); }
   }
 
-  if (url === "/api/sessions" && m === "GET") return json(res, 200, { sessions: store.listChats().map(c => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, count: c.messages.length })) });
+  if (url === "/api/sessions" && m === "GET") return json(res, 200, { sessions: store.listChatSummaries() });
   if (url.startsWith("/api/sessions/") && m === "GET") { const c = store.getChat(decodeURIComponent(url.slice(14))); return c ? json(res, 200, c) : json(res, 404, { error: "Chat not found" }); }
   if (url.startsWith("/api/sessions/") && m === "DELETE") { store.deleteChat(decodeURIComponent(url.slice(14))); return json(res, 200, { ok: true }); }
 
@@ -287,6 +312,7 @@ async function handle(req, res) {
   if (!guards.hostAllowed(req)) throw new HttpError(421, "Claudia Local only answers on 127.0.0.1 or localhost.");
   const url = (req.url || "/").split("?")[0];
   if (url === "/oauth/callback" && req.method === "GET") return oauthCallback(req, res);
+  if (url === "/oauth/claudia" && req.method === "GET") return oauthClaudia(req, res);
   if (!url.startsWith("/api/")) {
     if (req.method !== "GET" && req.method !== "HEAD") throw new HttpError(405, "Method not allowed");
     return serveStatic(req, res, url);
@@ -341,14 +367,18 @@ server.on("error", (e) => {
 });
 server.listen(PORT, HOST, () => {
   log(`Claudia Local ${VERSION} on http://${HOST}:${PORT} (data: ${HOME})`);
+  if (HOST !== "127.0.0.1") log(`Listening on ${HOST} inside Docker. Publish the port on 127.0.0.1 only, then open http://127.0.0.1:${PORT}`);
+  else if (process.env.CLAUDIA_LOCAL_HOST && !DOCKER) log("CLAUDIA_LOCAL_HOST is ignored outside the Docker image; listening on 127.0.0.1.");
   if (!existsSync(join(DIST, "index.html"))) log("The dashboard isn't built yet. Run: npm run build");
-  mcp.apply().catch((e) => log(`[mcp] ${e.message}`));
+  // The local MCP server and the agent's MCP connections start when you unlock (afterUnlock).
 });
 
 function shutdown(sig) {
   log(`${sig}: shutting down`);
   clearInterval(beat);
   mcp.close().catch(() => {});
+  mcpc.closeAll().catch(() => {});
+  auto.close();
   M.close().catch(() => {});
   S.close().catch(() => {});
   vault.lock();

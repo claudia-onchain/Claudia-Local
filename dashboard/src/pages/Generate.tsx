@@ -139,8 +139,8 @@ function Create() {
             </Field>
           )}
           {spoken && (
-            <Field label="Voice" hint={brand ? "Empty uses Claudia's voice from the brand kit. Use your own voice id: ElevenLabs' premade voices stop working on 2026-12-31." : "Your voice id from the provider."}>
-              <input className="input mono" value={voice} onChange={e => setVoice(e.target.value)} placeholder={brand ? "Claudia's voice" : "voice id"} />
+            <Field label="Voice" hint={brand ? "Empty uses the voice from your brand kit. Use your own voice id: ElevenLabs' premade voices stop working on 2026-12-31." : "Your voice id from the provider."}>
+              <input className="input mono" value={voice} onChange={e => setVoice(e.target.value)} placeholder={brand ? "Brand kit voice" : "voice id"} />
             </Field>
           )}
           {visual && aspects.length > 0 && (
@@ -189,8 +189,8 @@ function Create() {
             </details>
           )}
           <div className="row">
-            <Switch checked={brand} onChange={setBrand} label="Use Claudia's brand kit" />
-            <Link to="/claudia/brand" className="small right">Edit brand kit</Link>
+            <Switch checked={brand} onChange={setBrand} label="Use your brand kit" />
+            <Link to="/brand" className="small right">Edit brand kit</Link>
           </div>
         </div>
         <hr className="hr" />
@@ -280,7 +280,7 @@ function Library() {
             <span>Made</span><span>{fmtDate(open.job.provenance?.at || open.job.updatedAt)}</span>
             {open.job.provenance?.watermark && <><span>Watermark</span><span>{open.job.provenance.watermark}</span></>}
             {open.job.provenance?.terms && <><span>Terms</span><span>{open.job.provenance.terms}</span></>}
-            {open.job.request?.brand && <><span>Brand kit</span><span>Claudia</span></>}
+            {open.job.request?.brand && <><span>Brand kit</span><span>Yes</span></>}
             <span>File</span><span className="mono tiny">{o.mime} · {Math.round(o.bytes / 1024)} KB{o.width ? ` · ${o.width}×${o.height}` : ""}{o.durationSec ? ` · ${o.durationSec} s` : ""}</span>
             <span>SHA-256</span><span className="mono tiny">{o.sha256}</span>
           </div>

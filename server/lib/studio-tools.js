@@ -27,7 +27,7 @@ export const STUDIO_TOOLS = [
       kind: { type: "string", enum: studio.KINDS }, prompt: { type: "string", description: "What to make (image, video, music, sfx, avatar)" },
       text: { type: "string", description: "Words to speak (speech, avatar)" }, model: { type: "string", description: "Model id from list_media's model list; leave empty for the default" },
       aspect: { type: "string", enum: ["1:1", "16:9", "9:16", "4:5", "3:2", "2:3"] }, durationSec: { type: "number" }, resolution: { type: "string" },
-      brand: { type: "boolean", description: "Use Claudia's brand kit (portraits, voice, style). Default true." },
+      brand: { type: "boolean", description: "Use the user's brand kit (portraits, look, voice). Default true." },
       refs: { type: "array", items: { type: "string" }, description: "Reference files from the library, uploads or workspace, or https URLs" },
     }, ["kind"]), annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, scope: "media" },
   { name: "get_media_job", group: "Studio: media", label: "Check a media job", title: "Get media job",
