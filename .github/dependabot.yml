@@ -10,6 +10,10 @@ updates:
         patterns: ["react", "react-dom", "react-router-dom", "@types/*", "vite", "@vitejs/*", "typescript", "@fontsource/*"]
       useclaudia:
         patterns: ["@useclaudia/*"]
+    ignore:
+      # TypeScript 7 (the native rewrite) breaks the dashboard build; stay on 5.x until it's migrated.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
