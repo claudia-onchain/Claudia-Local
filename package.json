@@ -50,9 +50,9 @@
   },
   "dependencies": {
     "@solana/web3.js": "^1.99.0",
-    "@useclaudia/media": "^0.3.0",
-    "@useclaudia/sdk": "^0.3.0",
-    "@useclaudia/social": "^0.3.0",
+    "@useclaudia/media": "^0.4.0",
+    "@useclaudia/sdk": "^0.4.0",
+    "@useclaudia/social": "^0.4.0",
     "bs58": "^6.0.0",
     "viem": "^2.57.4",
     "ws": "^8.22.0"
