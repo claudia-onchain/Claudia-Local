@@ -54,7 +54,7 @@
     "@useclaudia/sdk": "^0.3.0",
     "@useclaudia/social": "^0.3.0",
     "bs58": "^6.0.0",
-    "viem": "^2.57.4",
+    "viem": "^2.57.13",
     "ws": "^8.22.0"
   },
   "devDependencies": {
