@@ -55,7 +55,7 @@
     "@useclaudia/social": "^0.3.0",
     "bs58": "^6.0.0",
     "viem": "^2.57.4",
-    "ws": "^8.22.0"
+    "ws": "^8.22.1"
   },
   "devDependencies": {
     "@fontsource/dm-mono": "^5.3.0",
